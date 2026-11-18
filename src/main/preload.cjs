@@ -19,6 +19,8 @@ contextBridge.exposeInMainWorld('kayvel', {
   playVanilla: (language) => ipcRenderer.invoke('kayvel:play-vanilla', language),
   installNeoForge: () => ipcRenderer.invoke('kayvel:install-neoforge'),
   playNeoForge: (language) => ipcRenderer.invoke('kayvel:play-neoforge', language),
+  cancelDownload: () => ipcRenderer.invoke('kayvel:cancel-download'),
+  retryDownload: (language) => ipcRenderer.invoke('kayvel:retry-download', language),
   downloadAndPlay: (language) => ipcRenderer.invoke('kayvel:download-and-play', language),
   onPreparationProgress: (callback) => {
     const listener = (_event, progress) => callback(progress);

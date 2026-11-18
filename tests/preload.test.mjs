@@ -22,8 +22,8 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   ipcRenderer.invoke = (...args) => { calls.push(args); return Promise.resolve({}); };
   const api = await loadPreload(ipcRenderer);
   assert.deepEqual(Object.keys(api).sort(), [
-    'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
-    'playNeoForge', 'playVanilla', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'updateModpack', 'window'
+    'cancelDownload', 'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
+    'playNeoForge', 'playVanilla', 'retryDownload', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'updateModpack', 'window'
   ]);
   await api.localProfile();
   await api.saveLocalNickname('LocalPlayer');

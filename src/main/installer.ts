@@ -6,7 +6,8 @@ import { Manifest, ManagedFile, validReleaseUrl, verifyManifest } from './manife
 import { downloadReleaseBytes, readReleaseBody, withReleaseDownload } from './release-download.js';
 import { stageProgress, type ReportProgress } from './preparation-progress.js';
 import { assertOptionalDestinationsFree, hasOptionalModsMarker, inspectOptionalMod, isSwitchable, optionalModsMarker, optionalModsMarkerPath } from './optional-mod-files.js';
-import { acquireGameDirectoryLock } from './game-directory-lock.js';
+import { acquireGameDirectoryLock, type LockOptions } from './game-directory-lock.js';
+import { checkDownloadCancelled } from './download-session.js';
 export { acquireGameDirectoryLock } from './game-directory-lock.js';
 
 async function regularFile(path: string): Promise<boolean> {
@@ -156,8 +157,9 @@ async function createDurableFile(path: string, contents: string): Promise<void> 
 }
 
 export async function withInstallationLock<T>(root: string,
-    action: (install: (manifestUrl: string, publicKeyPem: string, report?: ReportProgress, expectedManifest?: Buffer) => Promise<string>) => Promise<T>): Promise<T> {
-  const releaseLock = await acquireGameDirectoryLock(root);
+    action: (install: (manifestUrl: string, publicKeyPem: string, report?: ReportProgress, expectedManifest?: Buffer) => Promise<string>) => Promise<T>,
+    lockOptions: LockOptions = {}): Promise<T> {
+  const releaseLock = await acquireGameDirectoryLock(root, lockOptions);
   let active = true;
   let pending: Promise<string> | undefined;
   try {
@@ -229,6 +231,7 @@ async function installVerifiedRelease(root: string, signed: Awaited<ReturnType<t
     completedFiles++;
     report({ stage: 'modpack', file: file.path, received, total: required, completedFiles, totalFiles: manifest.files.length });
   }
+  checkDownloadCancelled();
   stageProgress(report, 'modpack', 'Размещение проверенных файлов сборки');
 
   const record = JSON.stringify({ bytes: bytes.toString('base64'), signature });

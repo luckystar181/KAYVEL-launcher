@@ -130,6 +130,52 @@ for (const marker of ['install', 'preparation']) {
   });
 }
 
+test('only explicit preparation recovery may acquire a stale preparation lock without removing its marker', async () => {
+  await fixture(async ({ root, lock }) => {
+    await owner(lock);
+    await fs.mkdir(join(root, '.preparation'));
+    const marker = join(root, '.preparation/incomplete.json');
+    await fs.writeFile(marker, 'preserved marker');
+    let scans = 0;
+    const acquire = isolatedLock({ alive: pid => pid === process.pid, snapshot: async () => { scans++; } });
+    await assert.rejects(acquire(root), /заблокирована/);
+    assert.equal(scans, 0);
+    const release = await acquire(root, { preparationRecovery: true });
+    assert.equal(scans, 1);
+    assert.equal(await fs.readFile(marker, 'utf8'), 'preserved marker');
+    await release();
+    await assert.rejects(fs.lstat(lock), { code: 'ENOENT' });
+    assert.equal(await fs.readFile(marker, 'utf8'), 'preserved marker');
+  });
+});
+
+for (const marker of ['install', 'update']) {
+  test(`explicit preparation recovery never authorizes an incomplete ${marker}`, async () => {
+    await fixture(async ({ root, lock, meta }) => {
+      const name = await owner(lock);
+      await fs.mkdir(join(root, '.preparation'));
+      await fs.writeFile(join(root, '.preparation/incomplete.json'), 'preparation');
+      await fs.writeFile(join(meta, `${marker}-incomplete.json`), 'preserve');
+      const acquire = isolatedLock({ alive: () => false, snapshot: async () => assert.fail('Incomplete modpack must block before a scan') });
+      await assert.rejects(acquire(root, { preparationRecovery: true }), /заблокирована/);
+      assert.deepEqual(await fs.readdir(lock), [name]);
+      assert.equal(await fs.readFile(join(meta, `${marker}-incomplete.json`), 'utf8'), 'preserve');
+    });
+  });
+}
+
+test('explicit preparation recovery still refuses a live registered child', async () => {
+  await fixture(async ({ root, lock }) => {
+    await owner(lock, 12345, process.pid);
+    await fs.mkdir(join(root, '.preparation'));
+    await fs.writeFile(join(root, '.preparation/incomplete.json'), 'preserve');
+    const before = await fs.readdir(lock);
+    const acquire = isolatedLock({ alive: pid => pid === process.pid, snapshot: async () => assert.fail('Live child must block before a scan') });
+    await assert.rejects(acquire(root, { preparationRecovery: true }), /заблокирована/);
+    assert.deepEqual(await fs.readdir(lock), before);
+  });
+});
+
 for (const problem of ['json', 'schema', 'filename', 'unknown-entry', 'hard-link', 'child-pid']) {
   test(`damaged lock metadata is preserved and cannot authorize recovery: ${problem}`, async () => {
     await fixture(async ({ root, lock, directory }) => {

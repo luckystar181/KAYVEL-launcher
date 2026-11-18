@@ -1,3 +1,4 @@
+import { checkDownloadCancelled } from './download-session.js';
 import { LibraryInfo, type Version } from '@xmcl/core';
 import { spawn } from 'node:child_process';
 import { lstat, open } from 'node:fs/promises';
@@ -79,6 +80,7 @@ async function runLocalProcessor(java: string, processor: LocalProcessor, files:
   const env = { ...process.env };
   for (const key of Object.keys(env)) if (['JAVA_TOOL_OPTIONS', '_JAVA_OPTIONS', 'JDK_JAVA_OPTIONS', 'CLASSPATH'].includes(key.toUpperCase())) delete env[key];
   try {
+    checkDownloadCancelled();
     await new Promise<void>((resolve, reject) => {
       const child = spawn(java, ['-cp', processor.classpath.map(path => files.path(path)).join(delimiter), mainClass, ...processor.args], {
         cwd: files.root, env, windowsHide: true, stdio: ['ignore', log.fd, log.fd], shell: false
@@ -94,6 +96,7 @@ async function runLocalProcessor(java: string, processor: LocalProcessor, files:
       });
     });
   } finally { await log.close(); }
+  checkDownloadCancelled();
   for (const output of processor.outputs) {
     if ((await lstat(files.path(output))).size === 0) throw new Error('Пустой результат процессора: ' + output);
     await files.record(output);

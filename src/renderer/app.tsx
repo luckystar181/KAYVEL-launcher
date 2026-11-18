@@ -10,7 +10,7 @@ import { createRoot } from 'react-dom/client';
 import './style.css';
 
 type MemorySettings = { memoryMb: number; minMemoryMb: number; maxMemoryMb: number; totalMemoryMb: number };
-type Status = { releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; modpackUpdate: ModpackUpdateStatus; preparationProgress: PreparationProgress | null };
+type Status = { downloadActive: boolean; downloadCancelling: boolean; preparationIncomplete: boolean; releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; modpackUpdate: ModpackUpdateStatus; preparationProgress: PreparationProgress | null };
 type Result = { ok: boolean; message: string };
 type GameExit = { code: number | null; gamePath: string };
 type LocalProfile = { nickname: string; skin: { model: 'classic' | 'slim'; bytes: number[]; copyPath: string; copyReady: boolean } | null };
@@ -36,6 +36,8 @@ declare global {
       install(): Promise<Result>;
       playVanilla(language: 'ru' | 'en'): Promise<Result>;
       playNeoForge(language: 'ru' | 'en'): Promise<Result>;
+      cancelDownload(): Promise<Result>;
+      retryDownload(language: 'ru' | 'en'): Promise<Result>;
       downloadAndPlay(language: 'ru' | 'en'): Promise<Result>;
       onPreparationProgress(callback: (progress: PreparationProgress | null) => void): () => void;
       onGameExit(callback: (exit: GameExit) => void): () => void;
@@ -50,7 +52,7 @@ const strings = {
     description: 'Пространство для своей команды. Всё необходимое - в одном месте.',
     install: 'УСТ. МОДПАК', play: 'ИГРАТЬ', settings: 'Настройки',
     preparing: 'Подготовка файлов…', noRelease: 'Сборка ещё не опубликована',
-    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.2 · v3S',
+    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.4 · v3S',
     language: 'Язык', back: 'Назад', gameFolder: 'Папка Minecraft с модами',
     stage: 'СОСТОЯНИЕ ПРОЕКТА', pack: 'Модпак', game: 'Minecraft',
     soon: 'В разработке', waiting: 'Ожидает публикации', available: 'Подписанный релиз настроен',
@@ -66,7 +68,7 @@ const strings = {
     description: 'A place for your team. Everything you need in one place.',
     install: 'INSTALL', play: 'PLAY', settings: 'Settings',
     preparing: 'Preparing files…', noRelease: 'No modpack release has been published',
-    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.2 · v3S',
+    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.4 · v3S',
     language: 'Language', back: 'Back', gameFolder: 'Modded Minecraft folder',
     stage: 'PROJECT STATUS', pack: 'Modpack', game: 'Minecraft',
     soon: 'In development', waiting: 'Awaiting release', available: 'Signed release configured',
@@ -294,13 +296,21 @@ function App() {
     } catch { setMessage(lang === 'ru' ? 'Обновление прервано. Не удаляйте резервную копию и файлы .kayvel.' : 'Update interrupted. Do not delete the backup or .kayvel files.'); }
     finally { setBusy(false); }
   }
-  async function downloadAndPlay() {
+  async function cancelActiveDownload() {
+    try {
+      const result = await window.kayvel.cancelDownload();
+      setMessage(result.message);
+      setStatus(await window.kayvel.status());
+    } catch { setMessage(lang === 'ru' ? 'Не удалось запросить отмену.' : 'Could not request cancellation.'); }
+  }
+  async function downloadAndPlay(retry = false) {
     if (!status?.releaseConfigured || busy) return;
+    if (retry && !window.confirm(lang === 'ru' ? 'Незавершённые Java, Minecraft и NeoForge будут сохранены в .kayvel/preparation-backups и скачаны заново. Миры, скриншоты, настройки и модпак не изменяются. Продолжить?' : 'Incomplete Java, Minecraft and NeoForge files will be backed up in .kayvel/preparation-backups and downloaded again. Worlds, screenshots, settings and modpack files are unchanged. Continue?')) return;
     setBusy(true);
     setProgress(null);
     setMessage('');
     try {
-      const result = await window.kayvel.downloadAndPlay(lang);
+      const result = retry ? await window.kayvel.retryDownload(lang) : await window.kayvel.downloadAndPlay(lang);
       setMessage(result.message);
       setStatus(await window.kayvel.status());
     } catch { setMessage(lang === 'ru' ? 'Операция прервана. Проверьте сохранённые файлы; автоматического повтора нет.' : 'Operation interrupted. Inspect the saved files; no automatic retry was made.'); }
@@ -345,8 +355,9 @@ function App() {
         </div>
         <div className="launch-bar">
           <div className="launch-copy"><span className="eyebrow">{t.game}</span><strong>{status?.gameRunning ? t.running : status?.neoforgeReady ? t.neoReady : t.neoWaiting}</strong>{(message || !status?.gameRunning) && <small role="status">{message || (status?.releaseConfigured ? t.downloadReady : t.noRelease)}</small>}<small>{lang === 'ru' ? 'Java → Minecraft → NeoForge → сборка с модами.' : 'Java → Minecraft → NeoForge → modpack.'}</small></div>
-          <div className="actions"><button className="play" disabled={!status?.releaseConfigured || busy || status.preparingVanilla || status.preparingNeoForge || status.installing || status.modSwitching || status.gameRunning || !profileReady || !savedNickname || nickname !== savedNickname} onClick={() => void downloadAndPlay()}>{status?.gameRunning ? t.running : busy ? t.preparing : status?.neoforgeReady ? t.play : (lang === 'ru' ? 'Скачать и играть' : 'Download and play')}<span>→</span></button></div>
+          <div className="actions"><button className="play" disabled={!status?.releaseConfigured || busy || status.preparingVanilla || status.preparingNeoForge || status.installing || status.modSwitching || status.gameRunning || !profileReady || !savedNickname || nickname !== savedNickname} onClick={() => void downloadAndPlay(Boolean(status?.preparationIncomplete))}>{status?.gameRunning ? t.running : busy ? t.preparing : status?.preparationIncomplete ? (lang === 'ru' ? 'Повторить загрузку' : 'Retry download') : status?.neoforgeReady ? t.play : (lang === 'ru' ? 'Скачать и играть' : 'Download and play')}<span>→</span></button></div>
         </div>
+        {status?.downloadActive && <div className="download-controls"><button type="button" disabled={status.downloadCancelling} onClick={() => void cancelActiveDownload()}>{status.downloadCancelling ? (lang === 'ru' ? 'Останавливаем…' : 'Stopping…') : (lang === 'ru' ? 'Отменить загрузку' : 'Cancel download')}</button><small>{lang === 'ru' ? 'Текущая запись файлов или локальная подготовка NeoForge завершится безопасно. Игра после отмены не запустится.' : 'Any current file write or local NeoForge task will finish safely. Cancellation will not launch the game.'}</small></div>}
         <ModpackUpdatePanel status={status?.modpackUpdate ?? null} busy={busy || !status || status.gameRunning || status.preparingNeoForge || status.preparingVanilla || status.installing || status.modSwitching} checking={checkingUpdates} lang={lang} onCheck={() => void checkUpdates()} onUpdate={() => void applyUpdate()} />
         {progress && !status?.gameRunning && <PreparationMeter progress={progress} lang={lang} />}
       </section>}

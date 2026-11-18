@@ -1,4 +1,6 @@
-import { app, BrowserWindow, ipcMain, nativeImage, session, screen, shell } from 'electron';
+import { cancellationMessage, cancelDownload, checkDownloadCancelled, configureDownloadRequest, withDownloadSignal } from './download-session.js';
+import { createChromiumDownloadRequest } from './chromium-download.js';
+import { app, BrowserWindow, ipcMain, nativeImage, net, session, screen, shell } from 'electron';
 import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -23,6 +25,7 @@ let window: BrowserWindow | null = null;
 let installing = false;
 let preparingVanilla = false;
 let preparingNeoForge = false;
+let downloadController: AbortController | null = null;
 let gameRunning = false;
 let modSwitching = false;
 let activeGamePath: string | null = null;
@@ -65,6 +68,9 @@ function clearPreparation(): void {
 }
 
 app.whenReady().then(async () => {
+  const downloads = session.fromPartition('kayvel-downloads', { cache: false });
+  downloads.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+  configureDownloadRequest(createChromiumDownloadRequest(downloads, options => net.request(options)));
   session.defaultSession.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
   session.defaultSession.webRequest.onHeadersReceived((details, callback) => {
     if (details.url.startsWith('file:')) callback({ responseHeaders: {
@@ -92,6 +98,12 @@ app.whenReady().then(async () => {
       sandbox: true,
       webSecurity: true
     }
+  });
+  window.on('close', event => {
+    if (!downloadController && !installing) return;
+    event.preventDefault();
+    if (downloadController) cancelDownload(downloadController);
+    stageProgress(reportPreparation, 'verify', 'Дождитесь завершения записи файлов и остановки подготовки, затем закройте окно.');
   });
   window.on('closed', () => { window = null; });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -164,6 +176,9 @@ ipcMain.handle('kayvel:status', (event) => {
   neoforgePath: neoforgePath(),
   neoforgeReady: preparedInstanceReady(),
   preparingNeoForge,
+  downloadActive: downloadController !== null,
+  downloadCancelling: downloadController?.signal.aborted ?? false,
+  preparationIncomplete: existsSync(join(neoforgePath(), '.preparation', 'incomplete.json')),
   neoforgeVersion: NEOFORGE_VERSION,
   activeGamePath,
   gameRunning,
@@ -244,35 +259,51 @@ ipcMain.handle('kayvel:install-neoforge', (event) => trusted(event) ? gamePrepar
 
 ipcMain.handle('kayvel:play-neoforge', (event, language: unknown) => trusted(event) ? playPreparedNeoForge(language) : { ok: false, message: 'Недоступно.' });
 
-ipcMain.handle('kayvel:download-and-play', async (event, language: unknown) => {
+ipcMain.handle('kayvel:cancel-download', event => {
   if (!trusted(event)) return { ok: false, message: 'Недоступно.' };
+  if (!downloadController) return { ok: false, message: 'Активной загрузки нет.' };
+  cancelDownload(downloadController);
+  return { ok: true, message: 'Отмена запрошена. Ожидаем завершения записи файлов или текущего локального процессора NeoForge.' };
+});
+ipcMain.handle('kayvel:retry-download', (event, language: unknown) => trusted(event) ? downloadAndPlay(language, true) : { ok: false, message: 'Недоступно.' });
+ipcMain.handle('kayvel:download-and-play', (event, language: unknown) => trusted(event) ? downloadAndPlay(language) : { ok: false, message: 'Недоступно.' });
+
+async function downloadAndPlay(language: unknown, retry = false) {
   if (!localProfileReleaseReady || !RELEASE_MANIFEST_URL || !MANIFEST_PUBLIC_KEY_PEM) return { ok: false, message: 'Новый подписанный выпуск сборки ещё не настроен.' };
   if (modSwitching || preparingNeoForge || preparingVanilla || installing || gameRunning) return { ok: false, message: 'Подготовка или игра уже выполняется.' };
+  const controller = new AbortController();
+  downloadController = controller;
   preparingNeoForge = true;
   let phase = 'Проверка параметров установки';
   try {
-    stageProgress(reportPreparation, 'verify', phase);
-    validateNickname(localProfile.read().nickname);
-    memorySettings.read();
-    let manifestUrl = RELEASE_MANIFEST_URL;
-    let expectedManifest: Buffer | undefined;
-    if (!existsSync(neoforgePath())) {
-      phase = 'Проверка доступной сборки';
-      stageProgress(reportPreparation, 'discovery', phase);
-      const latest = await discoverModpack(RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM);
-      manifestUrl = modpackReleaseUrl(RELEASE_MANIFEST_URL, latest.manifest.buildVersion);
-      expectedManifest = latest.bytes;
-    }
-    phase = 'Подготовка экземпляра';
-    await prepareInstance(app.getPath('userData'), manifestUrl, MANIFEST_PUBLIC_KEY_PEM, reportPreparation, undefined, expectedManifest);
+    await withDownloadSignal(controller.signal, async () => {
+      stageProgress(reportPreparation, 'verify', phase);
+      validateNickname(localProfile.read().nickname);
+      memorySettings.read();
+      let manifestUrl = RELEASE_MANIFEST_URL;
+      let expectedManifest: Buffer | undefined;
+      if (!existsSync(neoforgePath()) || retry) {
+        phase = 'Проверка доступной сборки';
+        stageProgress(reportPreparation, 'discovery', phase);
+        const latest = await discoverModpack(RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM);
+        manifestUrl = modpackReleaseUrl(RELEASE_MANIFEST_URL, latest.manifest.buildVersion);
+        expectedManifest = latest.bytes;
+      }
+      phase = 'Подготовка экземпляра';
+      await prepareInstance(app.getPath('userData'), manifestUrl, MANIFEST_PUBLIC_KEY_PEM, reportPreparation, undefined, expectedManifest, { retry });
+      checkDownloadCancelled();
+    });
+    if (controller.signal.aborted) return { ok: false, message: cancellationMessage };
+    if (retry) return { ok: true, message: 'Повторная загрузка завершена. Нажмите «Играть» для запуска.' };
     preparingNeoForge = false;
+    downloadController = null;
     return await playPreparedNeoForge(language);
   } catch (error) {
-    const message = `${phase}: ${error instanceof Error ? error.message : 'Не удалось подготовить игру.'}`;
+    const message = controller.signal.aborted ? cancellationMessage : `${phase}: ${error instanceof Error ? error.message : 'Не удалось подготовить игру.'}`;
     stageProgress(reportPreparation, 'error', message);
     return { ok: false, message };
-  } finally { preparingNeoForge = false; }
-});
+  } finally { downloadController = null; preparingNeoForge = false; }
+}
 
 async function playPreparedNeoForge(language: unknown) {
   if (modSwitching || preparingNeoForge || preparingVanilla || installing || gameRunning) return { ok: false, message: 'Подготовка или игра уже выполняется.' };

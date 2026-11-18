@@ -1,4 +1,5 @@
 import { validReleaseUrl } from './manifest.js';
+import { currentDownloadRequest, downloadSignal } from './download-session.js';
 
 type DownloadOptions = { request?: typeof fetch; timeoutMs?: number };
 const downloadTimeoutMs = 180_000;
@@ -15,6 +16,17 @@ const transportReasons: Record<string, string> = {
   UND_ERR_HEADERS_TIMEOUT: 'Сервер не прислал ответ вовремя.',
   UND_ERR_BODY_TIMEOUT: 'Сервер перестал передавать файл.',
   UND_ERR_SOCKET: 'Соединение оборвалось при передаче данных.',
+  ERR_CONNECTION_TIMED_OUT: 'Истекло время ожидания соединения.',
+  ERR_TIMED_OUT: 'Истекло время ожидания ответа сервера.',
+  ERR_NAME_NOT_RESOLVED: 'Не удалось определить адрес сервера (DNS).',
+  ERR_CONNECTION_RESET: 'Соединение с сервером было сброшено.',
+  ERR_CONNECTION_REFUSED: 'Сервер отклонил соединение.',
+  ERR_INTERNET_DISCONNECTED: 'Нет подключения к сети.',
+  ERR_PROXY_CONNECTION_FAILED: 'Не удалось подключиться к настроенному прокси.',
+  ERR_TUNNEL_CONNECTION_FAILED: 'Прокси не смог установить защищённое соединение.',
+  ERR_CERT_AUTHORITY_INVALID: 'Не удалось проверить сертификат сервера.',
+  ERR_CERT_DATE_INVALID: 'Неверный срок сертификата. Проверьте дату Windows.',
+  ERR_CERT_COMMON_NAME_INVALID: 'Сертификат не соответствует адресу сервера.',
   CERT_HAS_EXPIRED: 'Срок действия сертификата сервера истёк. Проверьте дату Windows.',
   UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'Не удалось проверить сертификат сервера.',
   DEPTH_ZERO_SELF_SIGNED_CERT: 'Получен недоверенный сертификат сервера.',
@@ -29,8 +41,10 @@ function transportReason(error: unknown): [string, string] {
     const current = pending[index];
     if (!current || typeof current !== 'object' || seen.has(current)) continue;
     seen.add(current);
-    const { code, cause, errors } = current as { code?: unknown; cause?: unknown; errors?: unknown };
+    const { code, cause, errors, message } = current as { code?: unknown; cause?: unknown; errors?: unknown; message?: unknown };
     if (typeof code === 'string' && Object.hasOwn(transportReasons, code)) return [code, transportReasons[code]];
+    const chromiumCode = typeof message === 'string' ? /\bnet::(ERR_[A-Z_]+)\b/.exec(message)?.[1] : undefined;
+    if (chromiumCode && Object.hasOwn(transportReasons, chromiumCode)) return [chromiumCode, transportReasons[chromiumCode]];
     if (cause) pending.push(cause);
     if (Array.isArray(errors)) pending.push(...errors.slice(0, 8));
   }
@@ -83,11 +97,15 @@ export async function withReleaseDownload<T>(url: string, consume: (response: Re
 
 export async function withTrustedDownload<T>(url: string, validateUrl: (value: string) => string,
     consume: (response: Response, signal: AbortSignal) => Promise<T>,
-    { request = fetch, timeoutMs = downloadTimeoutMs }: DownloadOptions = {}): Promise<T> {
+    { request = currentDownloadRequest(), timeoutMs = downloadTimeoutMs }: DownloadOptions = {}): Promise<T> {
   let current = validateUrl(url);
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > downloadTimeoutMs) throw new Error('Invalid download timeout');
   const controller = new AbortController();
   const { signal } = controller;
+  const parentSignal = downloadSignal();
+  const cancelled = () => controller.abort(parentSignal?.reason);
+  parentSignal?.addEventListener('abort', cancelled, { once: true });
+  if (parentSignal?.aborted) cancelled();
   const timeout = setTimeout(() => controller.abort(new Error(`Download timed out (${new URL(current).hostname}); automatic retry is disabled`)), timeoutMs);
   const visited = new Set<string>();
   let activeResponse: Response | undefined;
@@ -133,6 +151,7 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
     if (error instanceof ResponseTransportError) throw new DownloadTransportError(current, error.cause);
     throw error;
   } finally {
+    parentSignal?.removeEventListener('abort', cancelled);
     clearTimeout(timeout);
     controller.abort();
     if (activeResponse?.body && !activeResponse.body.locked) void activeResponse.body.cancel().catch(() => {});

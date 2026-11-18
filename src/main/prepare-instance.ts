@@ -9,6 +9,8 @@ import { prepareMinecraft } from './prepare-minecraft.js';
 import { NEOFORGE_RUNTIME_FILES, prepareNeoForge } from './prepare-neoforge.js';
 import { PreparationFiles, type FileReceipt } from './preparation-files.js';
 import { stageProgress, type ReportProgress } from './preparation-progress.js';
+import { checkDownloadCancelled } from './download-session.js';
+import { backupIncompletePreparation } from './preparation-recovery.js';
 
 export const INSTANCE_FOLDER = 'kayvel-1.21.1-neoforge-21.1.252-v3S';
 const incompletePath = '.preparation/incomplete.json';
@@ -78,13 +80,15 @@ export type PreparationDependencies = {
 const defaults: PreparationDependencies = { java: prepareJava, minecraft: prepareMinecraft, neoforge: prepareNeoForge, modpack: installRelease };
 
 export async function prepareInstance(userData: string, manifestUrl: string, publicKey: string, report: ReportProgress,
-    dependencies: PreparationDependencies = defaults, expectedManifest?: Buffer): Promise<string> {
+    dependencies: PreparationDependencies = defaults, expectedManifest?: Buffer, options: { retry?: boolean } = {}): Promise<string> {
+  checkDownloadCancelled();
   if (!manifestUrl || !publicKey) throw new Error('Новый подписанный выпуск сборки ещё не настроен.');
   const root = instancePath(userData);
   const parent = join(userData, 'instances');
   await mkdir(parent, { recursive: true });
   await realDirectory(parent);
-  if (await exists(root)) {
+  const recovering = await exists(root) && await exists(join(root, incompletePath));
+  if (await exists(root) && !(recovering && options.retry)) {
     await realDirectory(root);
     if (await exists(join(root, incompletePath))) throw new Error('Подготовка не завершена. Файлы сохранены для проверки; автоматическое восстановление отключено.');
     if (!await exists(join(root, readyPath))) throw new Error('Каталог экземпляра уже существует без записи подготовки. Файлы не приняты и не изменены.');
@@ -96,18 +100,30 @@ export async function prepareInstance(userData: string, manifestUrl: string, pub
   }
   const disk = await statfs(parent);
   if (disk.bavail * disk.bsize < 4_000_000_000) throw new Error('Для чистой установки нужно не менее 4 ГБ свободного места.');
-  await mkdir(root);
+  if (options.retry && !recovering) throw new Error('Незавершённая подготовка не найдена. Повторный сброс запрещён.');
+  checkDownloadCancelled();
+  if (!recovering) await mkdir(root);
   return withInstallationLock(root, async install => {
-    await writeNewFile(root, incompletePath, JSON.stringify({ schema: 1, instance: INSTANCE_FOLDER }));
+    if (recovering) {
+      stageProgress(report, 'verify', 'Сохранение незавершённой подготовки в резервную копию');
+      await backupIncompletePreparation(root, INSTANCE_FOLDER);
+    } else await writeNewFile(root, incompletePath, JSON.stringify({ schema: 1, instance: INSTANCE_FOLDER }));
     const files = new PreparationFiles(root);
     try {
+      checkDownloadCancelled();
       const java = await dependencies.java(files, userData, report);
+      checkDownloadCancelled();
       const minecraft = await dependencies.minecraft(files, report);
+      checkDownloadCancelled();
       await dependencies.neoforge(files, java, minecraft, report);
-      if (dependencies.modpack === installRelease) await install(manifestUrl, publicKey, report, expectedManifest);
+      checkDownloadCancelled();
+      const installed = recovering ? await getInstalledManifest(join(root, '.kayvel'), publicKey) : null;
+      if (installed) await verifyInstalledRelease(root, publicKey);
+      else if (dependencies.modpack === installRelease) await install(manifestUrl, publicKey, report, expectedManifest);
       else await dependencies.modpack(root, manifestUrl, publicKey, report);
+      checkDownloadCancelled();
       stageProgress(report, 'verify', 'Проверка подготовленного экземпляра');
-      await files.write(readyPath, JSON.stringify({ schema: 1, instance: INSTANCE_FOLDER, files: [...files.receipts.values()] }));
+      await writeNewFile(root, readyPath, JSON.stringify({ schema: 1, instance: INSTANCE_FOLDER, files: [...files.receipts.values()] }));
       await verifyPreparedFiles(root, publicKey, report);
       await unlink(join(root, incompletePath));
       stageProgress(report, 'ready', 'Minecraft, NeoForge и сборка готовы');
@@ -116,7 +132,7 @@ export async function prepareInstance(userData: string, manifestUrl: string, pub
       stageProgress(report, 'error', 'Подготовка остановлена. Файлы сохранены для проверки.');
       throw error;
     }
-  });
+  }, { preparationRecovery: recovering && options.retry });
 }
 
 export function preparedJava(root: string, userData: string): string {

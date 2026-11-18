@@ -6,6 +6,9 @@ import { instancePath, prepareInstance, verifyPreparation } from '../dist/main/p
 import { acquireGameDirectoryLock, withInstallationLock } from '../dist/main/installer.js';
 import { writeNewFile } from '../dist/main/install-files.js';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
+import { runInNewContext } from 'node:vm';
+import ts from 'typescript';
+import { cancelDownload, withDownloadSignal } from '../dist/main/download-session.js';
 
 const temporary = process.env.LOCALAPPDATA ? join(process.env.LOCALAPPDATA, 'Temp', 'opencode') : process.cwd();
 const url = 'https://github.com/example/kayvel/releases/download/fixture/manifest.json';
@@ -39,6 +42,61 @@ function dependencies(calls) {
     }
   };
 }
+
+async function isolatedModule(name, overrides = {}) {
+  const moduleUrl = new URL(`../dist/main/${name}.js`, import.meta.url);
+  const source = await readFile(moduleUrl, 'utf8');
+  const dependencies = { ...overrides };
+  for (const [, specifier] of source.matchAll(/from '([^']+)'/g)) {
+    if (!Object.hasOwn(dependencies, specifier)) dependencies[specifier] = await import(specifier.startsWith('.') ? new URL(specifier, moduleUrl).href : specifier);
+  }
+  const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } });
+  const exports = {};
+  runInNewContext(outputText, { exports, Buffer, Error, process, require: name => {
+    assert.ok(Object.hasOwn(dependencies, name), `Unexpected fixture dependency: ${name}`);
+    return dependencies[name];
+  } });
+  return exports;
+}
+
+test('explicit retry after cancelled modpack commit preserves signed mods and personal data, then prepares without reinstalling mods', async t => {
+  const userData = await workspace(t);
+  const calls = [];
+  const controller = new AbortController();
+  const deps = dependencies(calls);
+  const install = deps.modpack;
+  deps.modpack = async (...args) => {
+    const result = await install(...args);
+    cancelDownload(controller);
+    return result;
+  };
+  await assert.rejects(withDownloadSignal(controller.signal, () => prepareInstance(userData, url, publicKey, () => {}, deps)), /Загрузка отменена/);
+  const root = instancePath(userData);
+  await writeNewFile(root, 'saves/world/level.dat', 'keep world');
+  await writeNewFile(root, 'screenshots/a.png', 'keep screenshot');
+  await writeNewFile(root, 'options.txt', 'keep settings');
+  await writeNewFile(root, 'servers.dat', 'keep servers');
+  const originalMod = await readFile(join(root, 'mods/fixture.jar'));
+  const originalSigned = await readFile(join(root, '.kayvel/signed-manifest.json'));
+  const originalMarker = await readFile(join(root, '.preparation/incomplete.json'));
+  await assert.rejects(prepareInstance(userData, url, publicKey, () => {}, dependencies(calls)), /Подготовка не завершена/);
+  let snapshots = 0;
+  const recovery = await isolatedModule('preparation-recovery', { './lock-processes.js': { assertRecoveryProcessesStopped: async () => { snapshots++; } } });
+  const preparation = await isolatedModule('prepare-instance', { './preparation-recovery.js': recovery });
+  await preparation.prepareInstance(userData, url, publicKey, () => {}, dependencies(calls), undefined, { retry: true });
+  assert.equal(snapshots, 1);
+  assert.deepEqual(calls, ['java', 'minecraft', 'neoforge', 'modpack', 'java', 'minecraft', 'neoforge']);
+  await verifyPreparation(root, publicKey);
+  assert.deepEqual(await readFile(join(root, 'mods/fixture.jar')), originalMod);
+  assert.deepEqual(await readFile(join(root, '.kayvel/signed-manifest.json')), originalSigned);
+  for (const [name, content] of Object.entries({ 'saves/world/level.dat': 'keep world', 'screenshots/a.png': 'keep screenshot', 'options.txt': 'keep settings', 'servers.dat': 'keep servers' })) {
+    assert.equal(await readFile(join(root, name), 'utf8'), content);
+  }
+  const [backup] = await readdir(join(root, '.kayvel/preparation-backups'));
+  assert.deepEqual(await readFile(join(root, '.kayvel/preparation-backups', backup, 'preparation/incomplete.json')), originalMarker);
+  assert.equal(await readFile(join(root, '.kayvel/preparation-backups', backup, 'components', required[1]), 'utf8'), required[1]);
+  await assert.rejects(readFile(join(root, '.preparation/incomplete.json')), { code: 'ENOENT' });
+});
 
 test('successful preparation verifies a signed fixture, repeats without downloads and preserves old installations', async t => {
   const userData = await workspace(t);

@@ -1,3 +1,4 @@
+import * as downloadSession from '../dist/main/download-session.js';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
@@ -32,6 +33,8 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
   const root = join('fictional-profile', 'launcher');
   let ready;
   const modules = {
+    './chromium-download.js': { createChromiumDownloadRequest: () => () => assert.fail('No live network in VM') },
+    './download-session.js': { ...downloadSession, configureDownloadRequest() {} },
     electron: {
       shell: { openPath },
       app: { getPath: () => root, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
@@ -44,7 +47,7 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
       dialog: { showMessageBox: confirm ?? (() => { throw new Error('No game launch was authorized'); }) },
       nativeImage: {},
       ipcMain: { handle: (channel, handler) => handlers.set(channel, handler), on() {} },
-      session: { defaultSession: { setPermissionRequestHandler() {}, webRequest: { onHeadersReceived() {} } } },
+      session: { fromPartition: () => ({ setPermissionRequestHandler() {}, fetch: () => assert.fail('No live network in VM') }), defaultSession: { setPermissionRequestHandler() {}, webRequest: { onHeadersReceived() {} } } },
       screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 820 } }) }
     },
     'node:fs': { existsSync: () => false, lstatSync: missingEntry },
@@ -87,6 +90,7 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
   const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } });
   runInNewContext(outputText, {
     exports: {},
+    AbortController,
     URL,
     Error,
     require(name) {
@@ -101,9 +105,9 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
 test('main registers local-profile operations but no KAYVEL account or remote skin operations', async () => {
   const main = await isolatedMain();
   assert.deepEqual([...main.handlers.keys()].sort(), [
-    'kayvel:download-and-play', 'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
+    'kayvel:cancel-download', 'kayvel:download-and-play', 'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
     'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:memory-save', 'kayvel:memory-settings',
-    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:modpack-check', 'kayvel:modpack-update', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:status'
+    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:modpack-check', 'kayvel:modpack-update', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:retry-download', 'kayvel:status'
   ]);
   const status = main.invoke('kayvel:status');
   assert.equal(Object.hasOwn(status, 'apiConfigured'), false);
@@ -258,6 +262,78 @@ test('discovery failure reports its phase before preparing any instance and allo
   assert.equal(calls, 1);
   assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, false);
   assert.equal(calls, 2);
+});
+
+test('cancel IPC requires a trusted sender and keeps busy until the active preparation settles', async () => {
+  const stopped = deferred();
+  let signal;
+  let calls = 0;
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: preparedModules(async () => {
+    calls++;
+    signal = downloadSession.downloadSignal();
+    await stopped.promise;
+  }) });
+  assert.equal(main.invoke('kayvel:cancel-download').ok, false);
+  assert.equal((await main.handlers.get('kayvel:retry-download')({ sender: {} })).ok, false);
+  const pending = main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(main.invoke('kayvel:status').downloadActive, true);
+  assert.equal(main.handlers.get('kayvel:cancel-download')({ sender: {} }).ok, false);
+  assert.equal(signal.aborted, false);
+  assert.equal(main.invoke('kayvel:cancel-download').ok, true);
+  assert.equal(main.invoke('kayvel:cancel-download').ok, true);
+  assert.equal(signal.aborted, true);
+  assert.equal(main.invoke('kayvel:status').downloadCancelling, true);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, true);
+  for (const channel of ['kayvel:download-and-play', 'kayvel:retry-download', 'kayvel:play-neoforge', 'kayvel:mod-switch-set', 'kayvel:modpack-update']) {
+    assert.equal((await main.invoke(channel, 'ru')).ok, false);
+  }
+  assert.equal(calls, 1);
+  stopped.resolve();
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.message, downloadSession.cancellationMessage);
+  const status = main.invoke('kayvel:status');
+  assert.equal(status.downloadActive, false);
+  assert.equal(status.downloadCancelling, false);
+  assert.equal(status.preparingNeoForge, false);
+  assert.equal(status.gameRunning, false);
+  assert.equal(calls, 1);
+  assert.equal((await main.invoke('kayvel:retry-download', 'ru')).ok, true);
+  assert.equal(calls, 2);
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
+});
+
+test('retry passes only the explicit recovery option and never launches after successful preparation', async () => {
+  let calls = 0;
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: preparedModules(async (...args) => {
+    calls++;
+    assert.equal(args[6].retry, true);
+    assert.deepEqual(Object.keys(args[6]), ['retry']);
+    assert.equal(args[5], fixtureCandidate.bytes);
+    assert.equal(downloadSession.downloadSignal().aborted, false);
+  }) });
+  const result = await main.invoke('kayvel:retry-download', 'ru', { retry: false, root: 'untrusted' });
+  assert.equal(result.ok, true);
+  assert.match(result.message, /Нажмите «Играть»/);
+  assert.equal(calls, 1);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
+  assert.equal(main.invoke('kayvel:status').downloadActive, false);
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
+});
+
+test('retry errors clear busy and cancellation state without starting another attempt', async () => {
+  let calls = 0;
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: preparedModules(async () => {
+    calls++;
+    throw new Error('fixture recovery blocked');
+  }) });
+  const result = await main.invoke('kayvel:retry-download', 'ru');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /recovery blocked/);
+  assert.equal(calls, 1);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
+  assert.equal(main.invoke('kayvel:status').downloadActive, false);
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
 });
 
 test('direct launch still performs final verification and releases its lock on failure', async () => {

@@ -5,6 +5,7 @@ import { join } from 'node:path';
 import { assertRecoveryProcessesStopped, processMayBeAlive } from './lock-processes.js';
 
 export type GameDirectoryLock = (() => Promise<void>) & { trackChild?: (pid: number) => void };
+export type LockOptions = { preparationRecovery?: boolean };
 type Owner = { schema: 1; id: string; pid: number };
 type LockRecord = { owner: Owner | undefined; names: string[]; childPids: number[] };
 const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
@@ -81,18 +82,19 @@ async function removeGeneration(root: string, meta: string, lock: string, names:
   }
 }
 
-async function recover(root: string, meta: string, lock: string): Promise<void> {
+async function recover(root: string, meta: string, lock: string, options: LockOptions): Promise<void> {
   try {
     await lockDirectories(root, meta, lock);
     const initial = await readRecord(lock);
     if (initial.owner && processMayBeAlive(initial.owner.pid)) throw blocked();
-    if (await incomplete(root, meta)) throw blocked();
+    const unfinished = await incomplete(root, meta);
+    if (unfinished && !(unfinished === 'preparation' && options.preparationRecovery)) throw blocked();
     // Read child registrations only after the owner is known to have stopped writing them.
     const stopped = await readRecord(lock);
     if (stopped.owner?.id !== initial.owner?.id || stopped.owner?.pid !== initial.owner?.pid ||
         stopped.childPids.some(processMayBeAlive)) throw blocked();
     await assertRecoveryProcessesStopped();
-    if (await incomplete(root, meta)) throw blocked();
+    if (await incomplete(root, meta) !== unfinished) throw blocked();
     await removeGeneration(root, meta, lock, stopped.names);
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return;
@@ -100,7 +102,7 @@ async function recover(root: string, meta: string, lock: string): Promise<void> 
   }
 }
 
-export async function acquireGameDirectoryLock(root: string): Promise<GameDirectoryLock> {
+export async function acquireGameDirectoryLock(root: string, options: LockOptions = {}): Promise<GameDirectoryLock> {
   await mkdir(root).catch((error: NodeJS.ErrnoException) => { if (error.code !== 'EEXIST') throw error; });
   await realDirectory(root);
   const meta = join(root, '.kayvel');
@@ -118,7 +120,7 @@ export async function acquireGameDirectoryLock(root: string): Promise<GameDirect
     try { await file.writeFile(JSON.stringify(owner)); await file.sync(); }
     finally { await file.close(); }
     for (let attempt = 0; attempt < 3 && !published; attempt++) {
-      if (await exists(lock)) await recover(root, meta, lock);
+      if (await exists(lock)) await recover(root, meta, lock, options);
       try {
         await lockDirectories(root, meta, candidate);
         await rename(candidate, lock);
@@ -152,8 +154,8 @@ export async function acquireGameDirectoryLock(root: string): Promise<GameDirect
   try {
     const unfinished = await incomplete(root, meta);
     if (unfinished === 'update') throw new Error('Обновление сборки не завершено. Запуск заблокирован; сохраните .kayvel/updates и update-incomplete.json для восстановления.');
-    if (unfinished === 'preparation') throw new Error('Подготовка не завершена. Файлы сохранены для проверки; автоматическое восстановление отключено.');
-    if (unfinished) throw new Error('Обнаружена незавершённая установка модпака. Не запускайте игру и не удаляйте файлы .kayvel до проверки.');
+    if (unfinished === 'preparation' && !options.preparationRecovery) throw new Error('Подготовка не завершена. Файлы сохранены для проверки; автоматическое восстановление отключено.');
+    if (unfinished === 'install') throw new Error('Обнаружена незавершённая установка модпака. Не запускайте игру и не удаляйте файлы .kayvel до проверки.');
   } catch (error) {
     await release();
     throw error;

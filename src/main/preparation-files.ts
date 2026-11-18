@@ -1,3 +1,4 @@
+import { checkDownloadCancelled } from './download-session.js';
 import { lstat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { downloadNewFile, fileDigest, type DownloadFile } from './official-download.js';
@@ -23,12 +24,14 @@ export class PreparationFiles {
   }
 
   async write(relative: string, bytes: Uint8Array | string): Promise<void> {
+    checkDownloadCancelled();
     await writeNewFile(this.root, relative, bytes);
     await this.record(relative);
   }
 
   async downloads(plan: PlannedDownload[], stage: PreparationStage, report: ReportProgress,
       validateUrl?: (value: string) => string): Promise<void> {
+    checkDownloadCancelled();
     const unique = new Map<string, PlannedDownload>();
     for (const file of plan) {
       const key = safeRelativePath(file.path).toLowerCase();
@@ -54,6 +57,7 @@ export class PreparationFiles {
         const file = queue[next++];
         let previous = 0;
         try {
+          checkDownloadCancelled();
           await prepareFileDirectory(this.root, file.path);
           await downloadNewFile({ ...file, path: this.path(file.path) }, current => {
             received += current - previous;
