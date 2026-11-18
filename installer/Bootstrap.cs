@@ -4,7 +4,6 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.IO.Compression;
-using System.Net;
 using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -25,7 +24,7 @@ namespace KayvelSetup
 
         public void Validate()
         {
-            if (Version != "v0.2.4-v3S" || !Regex.IsMatch(Sha256 ?? "", "\\A[a-f0-9]{64}\\z") || Bytes < 1 || Bytes > 1000000000)
+            if (Version != "v0.2.5-v3S" || !Regex.IsMatch(Sha256 ?? "", "\\A[a-f0-9]{64}\\z") || Bytes < 1 || Bytes > 1000000000)
                 throw new InvalidDataException("Некорректные параметры установщика.");
             Uri uri = new Uri(Url, UriKind.Absolute);
             InstallerCore.ValidateUrl(uri);
@@ -62,67 +61,6 @@ namespace KayvelSetup
             }
         }
 
-        public static async Task Download(Settings settings, string destination, IProgress<int> progress, CancellationToken token)
-        {
-            settings.Validate();
-            ServicePointManager.SecurityProtocol = SecurityProtocolType.Tls12;
-            Uri uri = new Uri(settings.Url);
-            var visited = new HashSet<string>(StringComparer.Ordinal);
-            using (var deadline = CancellationTokenSource.CreateLinkedTokenSource(token))
-            {
-                deadline.CancelAfter(TimeSpan.FromMinutes(15));
-                for (int hop = 0; hop <= 5; hop++)
-                {
-                    deadline.Token.ThrowIfCancellationRequested();
-                    ValidateUrl(uri);
-                    if (!visited.Add(uri.AbsoluteUri)) throw new IOException("Цикл перенаправлений.");
-                    var request = (HttpWebRequest)WebRequest.Create(uri);
-                    request.AllowAutoRedirect = false;
-                    request.AutomaticDecompression = DecompressionMethods.None;
-                    request.Credentials = null;
-                    request.UseDefaultCredentials = false;
-                    request.UserAgent = "KAYVEL-Setup/0.2.4";
-                    request.Headers[HttpRequestHeader.AcceptEncoding] = "identity";
-                    using (deadline.Token.Register(request.Abort))
-                    using (var response = (HttpWebResponse)await request.GetResponseAsync())
-                    {
-                        int code = (int)response.StatusCode;
-                        if (code == 301 || code == 302 || code == 303 || code == 307 || code == 308)
-                        {
-                            if (hop == 5 || String.IsNullOrEmpty(response.Headers[HttpResponseHeader.Location]))
-                                throw new IOException("Слишком много перенаправлений или отсутствует адрес.");
-                            uri = new Uri(uri, response.Headers[HttpResponseHeader.Location]);
-                            continue;
-                        }
-                        if (code != 200 || (response.ContentLength != -1 && response.ContentLength != settings.Bytes) ||
-                            (!String.IsNullOrEmpty(response.ContentEncoding) && response.ContentEncoding != "identity"))
-                            throw new IOException("Сервер вернул неожиданный ответ (HTTP " + code + ").");
-                        using (Stream input = response.GetResponseStream())
-                        using (var output = new FileStream(destination, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
-                        using (var hash = SHA256.Create())
-                        {
-                            byte[] buffer = new byte[65536];
-                            long total = 0;
-                            int count;
-                            while ((count = await input.ReadAsync(buffer, 0, buffer.Length, deadline.Token)) != 0)
-                            {
-                                total += count;
-                                if (total > settings.Bytes) throw new InvalidDataException("Превышен размер загрузки.");
-                                hash.TransformBlock(buffer, 0, count, null, 0);
-                                await output.WriteAsync(buffer, 0, count, deadline.Token);
-                                progress.Report((int)(total * 100 / settings.Bytes));
-                            }
-                            hash.TransformFinalBlock(new byte[0], 0, 0);
-                            if (total != settings.Bytes || Hex(hash.Hash) != settings.Sha256)
-                                throw new InvalidDataException("Проверка SHA-256 не пройдена. Установка остановлена.");
-                        }
-                        return;
-                    }
-                }
-            }
-            throw new IOException("Загрузка не завершена.");
-        }
-
         public static string Hex(byte[] bytes)
         {
             return BitConverter.ToString(bytes).Replace("-", "").ToLowerInvariant();
@@ -144,66 +82,85 @@ namespace KayvelSetup
 
         public static void ExtractVerified(string zipPath, Settings settings, string destination, IProgress<int> progress, CancellationToken token)
         {
+            using (var file = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+                ExtractVerified(file, settings, destination, progress, token);
+        }
+
+        public static void ExtractVerified(Stream file, Settings settings, string destination, IProgress<int> progress, CancellationToken token)
+        {
             settings.Validate();
             CheckDirectoryChain(Path.GetDirectoryName(destination));
             if (File.Exists(destination) || Directory.Exists(destination)) throw new IOException("Каталог установки уже существует.");
-            using (var file = new FileStream(zipPath, FileMode.Open, FileAccess.Read, FileShare.Read))
+            if (file == null || !file.CanRead || !file.CanSeek || file.Length != settings.Bytes)
+                throw new InvalidDataException("Отсутствует встроенный архив или неверен его размер.");
+            token.ThrowIfCancellationRequested();
+            file.Position = 0;
+            using (var hash = SHA256.Create())
             {
-                using (var hash = SHA256.Create())
-                    if (file.Length != settings.Bytes || Hex(hash.ComputeHash(file)) != settings.Sha256)
-                        throw new InvalidDataException("Архив не соответствует закреплённому SHA-256.");
-                token.ThrowIfCancellationRequested();
-                file.Position = 0;
-                using (var archive = new ZipArchive(file, ZipArchiveMode.Read))
+                byte[] buffer = new byte[65536];
+                int count;
+                while ((count = file.Read(buffer, 0, buffer.Length)) != 0)
                 {
-                    if (archive.Entries.Count == 0 || archive.Entries.Count > 50000) throw new InvalidDataException("Некорректное число файлов.");
-                    var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-                    long total = 0;
-                    foreach (var entry in archive.Entries)
+                    token.ThrowIfCancellationRequested();
+                    hash.TransformBlock(buffer, 0, count, null, 0);
+                }
+                hash.TransformFinalBlock(new byte[0], 0, 0);
+                if (Hex(hash.Hash) != settings.Sha256)
+                    throw new InvalidDataException("Архив не соответствует закреплённому SHA-256.");
+            }
+            token.ThrowIfCancellationRequested();
+            file.Position = 0;
+            using (var archive = new ZipArchive(file, ZipArchiveMode.Read, true))
+            {
+                if (archive.Entries.Count == 0 || archive.Entries.Count > 50000) throw new InvalidDataException("Некорректное число файлов.");
+                var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                long total = 0;
+                foreach (var entry in archive.Entries)
+                {
+                    token.ThrowIfCancellationRequested();
+                    bool directory = entry.FullName.EndsWith("/", StringComparison.Ordinal);
+                    string name = SafeEntry(directory ? entry.FullName.Substring(0, entry.FullName.Length - 1) : entry.FullName);
+                    int kind = (entry.ExternalAttributes >> 16) & 0xF000;
+                    if ((entry.ExternalAttributes & (int)FileAttributes.ReparsePoint) != 0 ||
+                        (kind != 0 && kind != (directory ? 0x4000 : 0x8000)) || !paths.Add(name))
+                        throw new InvalidDataException("Ссылка, специальный файл или дубликат в ZIP.");
+                    total = checked(total + entry.Length);
+                    if (entry.Length < 0 || entry.Length > 1000000000 || total > 2000000000 || (directory && entry.Length != 0))
+                        throw new InvalidDataException("Превышен распакованный размер ZIP.");
+                }
+                if (!paths.Contains("KAYVEL.exe") || !paths.Contains("resources/app/package.json") || !paths.Contains("resources/app/dist/main/main.js"))
+                    throw new InvalidDataException("В архиве нет лаунчера.");
+                token.ThrowIfCancellationRequested();
+                Directory.CreateDirectory(destination);
+                string root = Path.GetFullPath(destination) + Path.DirectorySeparatorChar;
+                long written = 0;
+                foreach (var entry in archive.Entries)
+                {
+                    token.ThrowIfCancellationRequested();
+                    bool directory = entry.FullName.EndsWith("/", StringComparison.Ordinal);
+                    string relative = directory ? entry.FullName.TrimEnd('/') : entry.FullName;
+                    string outputPath = Path.GetFullPath(Path.Combine(destination, relative.Replace('/', Path.DirectorySeparatorChar)));
+                    if (!outputPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Выход за каталог установки.");
+                    CheckDirectoryChain(Path.GetDirectoryName(outputPath));
+                    if (directory) { CheckDirectoryChain(outputPath); Directory.CreateDirectory(outputPath); continue; }
+                    Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
+                    CheckDirectoryChain(Path.GetDirectoryName(outputPath));
+                    using (Stream input = entry.Open())
+                    using (var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
                     {
-                        bool directory = entry.FullName.EndsWith("/", StringComparison.Ordinal);
-                        string name = SafeEntry(directory ? entry.FullName.Substring(0, entry.FullName.Length - 1) : entry.FullName);
-                        int kind = (entry.ExternalAttributes >> 16) & 0xF000;
-                        if ((entry.ExternalAttributes & (int)FileAttributes.ReparsePoint) != 0 ||
-                            (kind != 0 && kind != (directory ? 0x4000 : 0x8000)) || !paths.Add(name))
-                            throw new InvalidDataException("Ссылка, специальный файл или дубликат в ZIP.");
-                        total = checked(total + entry.Length);
-                        if (entry.Length < 0 || entry.Length > 1000000000 || total > 2000000000 || (directory && entry.Length != 0))
-                            throw new InvalidDataException("Превышен распакованный размер ZIP.");
-                    }
-                    if (!paths.Contains("KAYVEL.exe") || !paths.Contains("resources/app/package.json") || !paths.Contains("resources/app/dist/main/main.js"))
-                        throw new InvalidDataException("В архиве нет лаунчера.");
-                    Directory.CreateDirectory(destination);
-                    string root = Path.GetFullPath(destination) + Path.DirectorySeparatorChar;
-                    long written = 0;
-                    foreach (var entry in archive.Entries)
-                    {
-                        token.ThrowIfCancellationRequested();
-                        bool directory = entry.FullName.EndsWith("/", StringComparison.Ordinal);
-                        string relative = directory ? entry.FullName.TrimEnd('/') : entry.FullName;
-                        string outputPath = Path.GetFullPath(Path.Combine(destination, relative.Replace('/', Path.DirectorySeparatorChar)));
-                        if (!outputPath.StartsWith(root, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("Выход за каталог установки.");
-                        CheckDirectoryChain(Path.GetDirectoryName(outputPath));
-                        if (directory) { CheckDirectoryChain(outputPath); Directory.CreateDirectory(outputPath); continue; }
-                        Directory.CreateDirectory(Path.GetDirectoryName(outputPath));
-                        CheckDirectoryChain(Path.GetDirectoryName(outputPath));
-                        using (Stream input = entry.Open())
-                        using (var output = new FileStream(outputPath, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                        byte[] buffer = new byte[65536];
+                        int count;
+                        long length = 0;
+                        while ((count = input.Read(buffer, 0, buffer.Length)) != 0)
                         {
-                            byte[] buffer = new byte[65536];
-                            int count;
-                            long length = 0;
-                            while ((count = input.Read(buffer, 0, buffer.Length)) != 0)
-                            {
-                                token.ThrowIfCancellationRequested();
-                                length += count;
-                                if (length > entry.Length) throw new InvalidDataException("Некорректный размер файла ZIP.");
-                                output.Write(buffer, 0, count);
-                                written += count;
-                                progress.Report(total == 0 ? 0 : (int)(written * 100 / total));
-                            }
-                            if (length != entry.Length) throw new InvalidDataException("Неполный файл ZIP.");
+                            token.ThrowIfCancellationRequested();
+                            length += count;
+                            if (length > entry.Length) throw new InvalidDataException("Некорректный размер файла ZIP.");
+                            output.Write(buffer, 0, count);
+                            written += count;
+                            progress.Report(total == 0 ? 0 : (int)(written * 100 / total));
                         }
+                        if (length != entry.Length) throw new InvalidDataException("Неполный файл ZIP.");
                     }
                 }
             }
@@ -247,7 +204,7 @@ namespace KayvelSetup
 
     internal sealed class SetupForm : Form
     {
-        private readonly Label status = new Label { Left = 24, Top = 60, Width = 480, Height = 80, Text = "Скачает лаунчер с GitHub и создаст ярлык на рабочем столе.\nMinecraft и сборка загружаются при первом нажатии «Скачать и играть».\nСтарые установки и миры не изменяются." };
+        private readonly Label status = new Label { Left = 24, Top = 60, Width = 480, Height = 80, Text = "Установит встроенные лаунчер и Java без загрузки с GitHub.\nMinecraft и сборка загружаются при первом нажатии «Скачать и играть».\nСтарые установки и миры не изменяются." };
         private readonly ProgressBar meter = new ProgressBar { Left = 24, Top = 150, Width = 470, Height = 24 };
         private readonly Button action = new Button { Left = 24, Top = 198, Width = 220, Height = 36, Text = "Установить KAYVEL v3S" };
         private readonly Button cancel = new Button { Left = 354, Top = 198, Width = 140, Height = 36, Text = "Закрыть" };
@@ -297,15 +254,14 @@ namespace KayvelSetup
                 workspace = Path.Combine(parent, ".setup-" + id);
                 Directory.CreateDirectory(workspace);
                 InstallerCore.CheckDirectoryChain(workspace);
-                string zip = Path.Combine(workspace, "launcher.zip");
-                status.Text = "Загрузка лаунчера с GitHub…";
-                await InstallerCore.Download(settings, zip, new Progress<int>(value => meter.Value = value), cancellation.Token);
-                cancellation.Token.ThrowIfCancellationRequested();
-                status.Text = "Проверка SHA-256 и распаковка…";
+                status.Text = "Проверка встроенного архива и распаковка лаунчера с Java…";
                 meter.Value = 0;
                 var progress = new Progress<int>(value => meter.Value = value);
                 string staging = Path.Combine(workspace, "app");
-                await Task.Run(() => InstallerCore.ExtractVerified(zip, settings, staging, progress, cancellation.Token));
+                await Task.Run(() => {
+                    using (var payload = Assembly.GetExecutingAssembly().GetManifestResourceStream("launcher-payload.zip"))
+                        InstallerCore.ExtractVerified(payload, settings, staging, progress, cancellation.Token);
+                });
                 cancellation.Token.ThrowIfCancellationRequested();
                 InstallerCore.CheckDirectoryChain(parent);
                 InstallerCore.CheckDirectoryChain(staging);
@@ -321,15 +277,15 @@ namespace KayvelSetup
                 {
                     status.Text = "Лаунчер установлен, но ярлык создать не удалось.\nПапка: " + installed;
                 }
-                // Only this run's download is disposable; user data and old installations are never removed.
-                try { File.Delete(zip); Directory.Delete(workspace); } catch (IOException) { } catch (UnauthorizedAccessException) { }
+                // Only this run's empty staging folder is disposable; old installations are never removed.
+                try { Directory.Delete(workspace); } catch (IOException) { } catch (UnauthorizedAccessException) { }
                 meter.Value = 100;
                 action.Text = "Открыть KAYVEL";
                 action.Enabled = true;
             }
             catch (Exception error)
             {
-                status.Text = (cancellation.IsCancellationRequested ? "Установка отменена." : "Установка остановлена: " + (error is WebException ? "Не удалось скачать файлы с GitHub." : error.Message)) +
+                status.Text = (cancellation.IsCancellationRequested ? "Установка отменена." : "Установка остановлена: " + error.Message) +
                     (workspace == null ? "" : "\nЧастичные файлы оставлены: " + workspace);
             }
             finally

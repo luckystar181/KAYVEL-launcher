@@ -4,6 +4,8 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 import { copyPortableRuntime, portableOutputName, reservePortableOutput } from './portable-output.mjs';
 import { copyLauncherMain } from './launcher-main-files.mjs';
+import { readBundledJava, BUNDLED_JAVA_ROOT } from '../dist/main/bundled-java.js';
+import { readZipFiles } from '../dist/main/install-files.js';
 
 const root = resolve(fileURLToPath(new URL('..', import.meta.url)));
 const electron = join(root, 'node_modules', 'electron', 'dist');
@@ -14,10 +16,21 @@ await stat(join(electron, 'electron.exe'));
 await stat(join(root, 'dist', 'main', 'main.js'));
 await stat(join(root, 'dist', 'renderer', 'index.html'));
 
+const java = await readBundledJava(join(root, 'bundled', 'java.zip'));
 const target = await reservePortableOutput(join(root, 'dist', 'portable'), outputName);
 const app = join(target, 'resources', 'app');
 await copyPortableRuntime(electron, target);
 await mkdir(app, { recursive: true });
+await mkdir(join(app, 'bundled'));
+await writeFile(join(app, 'bundled', 'java.zip'), java, { flag: 'wx' });
+await cp(join(root, 'bundled', 'README.md'), join(app, 'bundled', 'README.md'));
+const legal = await readZipFiles(join(app, 'bundled', 'java.zip'), name => name.startsWith(BUNDLED_JAVA_ROOT + '/legal/') || name === BUNDLED_JAVA_ROOT + '/NOTICE' || name === BUNDLED_JAVA_ROOT + '/release', 10_000_000);
+if (!legal.has(BUNDLED_JAVA_ROOT + '/legal/java.base/LICENSE') || !legal.has(BUNDLED_JAVA_ROOT + '/NOTICE')) throw new Error('Missing bundled Java license/NOTICE.');
+for (const [name, bytes] of legal) {
+  const destination = join(app, 'bundled', name);
+  await mkdir(dirname(destination), { recursive: true });
+  await writeFile(destination, bytes, { flag: 'wx' });
+}
 await rename(join(target, 'electron.exe'), join(target, 'KAYVEL.exe'));
 await copyLauncherMain(join(root, 'dist', 'main'), join(app, 'dist', 'main'));
 await cp(join(root, 'dist', 'renderer'), join(app, 'dist', 'renderer'), { recursive: true });

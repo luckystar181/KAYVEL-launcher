@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-export const setupVersion = 'v0.2.4-v3S';
+export const setupVersion = 'v0.2.5-v3S';
 export const payloadName = 'KAYVEL-v3S-windows-x64.zip';
 
 export function installerSettings(bytes, sha256) {
@@ -39,7 +39,7 @@ export async function packageSetup(portable, output) {
     if (!(await lstat(join(portable, file))).isFile()) throw new Error('Incomplete portable: ' + file);
   }
   const app = JSON.parse(await readFile(join(portable, 'resources/app/package.json'), 'utf8'));
-  if (app.version !== '0.2.4') throw new Error('Setup requires launcher 0.2.4.');
+  if (app.version !== '0.2.5') throw new Error('Setup requires launcher 0.2.5.');
   const release = await readFile(join(portable, 'resources/app/dist/main/release.js'), 'utf8');
   if (!release.includes('/releases/download/v0.2.0-v3S/manifest.json')) throw new Error('Portable must target the v3S modpack.');
   await reserveSetupOutput(output);
@@ -67,11 +67,11 @@ try {
   await writeFile(config, JSON.stringify(settings, null, 2) + '\n', { flag: 'wx' });
   const exe = join(output, 'KAYVEL-Setup-v3S.exe');
   const compiler = join(process.env.SystemRoot, 'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
-  run(compiler, ['/nologo', '/target:winexe', '/platform:anycpu', '/optimize+', `/out:${exe}`, `/win32manifest:${join(root, 'installer/app.manifest')}`, `/resource:${config},installer-settings.json`, '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll', join(root, 'installer/Bootstrap.cs')]);
+  run(compiler, ['/nologo', '/target:winexe', '/platform:anycpu', '/optimize+', `/out:${exe}`, `/win32manifest:${join(root, 'installer/app.manifest')}`, `/resource:${config},installer-settings.json`, `/resource:${zip},launcher-payload.zip`, '/reference:System.Windows.Forms.dll', '/reference:System.Drawing.dll', '/reference:System.Web.Extensions.dll', '/reference:System.IO.Compression.dll', '/reference:System.IO.Compression.FileSystem.dll', join(root, 'installer/Bootstrap.cs')]);
   const setupHash = createHash('sha256');
   for await (const chunk of createReadStream(exe)) setupHash.update(chunk);
   await writeFile(join(output, 'SHA256SUMS.txt'), `${setupHash.digest('hex')}  KAYVEL-Setup-v3S.exe\n${settings.Sha256}  ${payloadName}\n`, { flag: 'wx' });
-  console.log(`Setup: ${exe}\nPayload: ${zip}\nPublish both files to KAYVEL-launcher ${setupVersion}. Users download only the setup EXE. Authenticode signing is not configured.`);
+  console.log(`Setup: ${exe}\nPayload: ${zip}\nUsers need only the setup EXE: the verified payload is embedded. The separate ZIP is a diagnostic/portable asset. Authenticode signing is not configured.`);
   return { exe, zip, settings };
 }
 

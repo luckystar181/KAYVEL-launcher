@@ -1,8 +1,10 @@
 import { validReleaseUrl } from './manifest.js';
 import { currentDownloadRequest, downloadSignal } from './download-session.js';
 
-type DownloadOptions = { request?: typeof fetch; timeoutMs?: number };
-const downloadTimeoutMs = 180_000;
+type DownloadOptions = { request?: typeof fetch; timeoutMs?: number; idleTimeoutMs?: number };
+const downloadTimeoutMs = 60 * 60_000;
+const downloadIdleTimeoutMs = 180_000;
+const downloadActivity = new WeakMap<AbortSignal, (bytes: number) => void>();
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
 const transportReasons: Record<string, string> = {
   ENOTFOUND: 'Не удалось определить адрес сервера (DNS).',
@@ -97,16 +99,31 @@ export async function withReleaseDownload<T>(url: string, consume: (response: Re
 
 export async function withTrustedDownload<T>(url: string, validateUrl: (value: string) => string,
     consume: (response: Response, signal: AbortSignal) => Promise<T>,
-    { request = currentDownloadRequest(), timeoutMs = downloadTimeoutMs }: DownloadOptions = {}): Promise<T> {
+    { request = currentDownloadRequest(), timeoutMs = downloadTimeoutMs, idleTimeoutMs = downloadIdleTimeoutMs }: DownloadOptions = {}): Promise<T> {
   let current = validateUrl(url);
-  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > downloadTimeoutMs) throw new Error('Invalid download timeout');
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > downloadTimeoutMs
+      || !Number.isSafeInteger(idleTimeoutMs) || idleTimeoutMs < 1 || idleTimeoutMs > downloadIdleTimeoutMs) throw new Error('Invalid download timeout');
   const controller = new AbortController();
   const { signal } = controller;
   const parentSignal = downloadSignal();
   const cancelled = () => controller.abort(parentSignal?.reason);
   parentSignal?.addEventListener('abort', cancelled, { once: true });
   if (parentSignal?.aborted) cancelled();
-  const timeout = setTimeout(() => controller.abort(new Error(`Download timed out (${new URL(current).hostname}); automatic retry is disabled`)), timeoutMs);
+  let received = 0;
+  let waitingForResponse = true;
+  let idleTimeout: ReturnType<typeof setTimeout> | undefined;
+  const activity = () => {
+    clearTimeout(idleTimeout);
+    if (signal.aborted) return;
+    idleTimeout = setTimeout(() => controller.abort(new Error(
+      `Загрузка с ${new URL(current).hostname}: ${waitingForResponse ? 'сервер не прислал ответ' : 'не поступают новые данные'} ${Math.round(idleTimeoutMs / 1000)} с; получено ${received} байт. Автоматический повтор отключён.`
+    )), idleTimeoutMs);
+  };
+  downloadActivity.set(signal, bytes => { received += bytes; activity(); });
+  const timeout = setTimeout(() => controller.abort(new Error(
+    `Загрузка с ${new URL(current).hostname}: превышен общий лимит ${Math.round(timeoutMs / 60_000)} мин; получено ${received} байт. Автоматический повтор отключён.`
+  )), timeoutMs);
+  activity();
   const visited = new Set<string>();
   let activeResponse: Response | undefined;
   try {
@@ -114,6 +131,8 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
       signal.throwIfAborted();
       if (visited.has(current)) throw new Error('Download redirect loop');
       visited.add(current);
+      waitingForResponse = true;
+      activity();
       let response: Response;
       try {
         response = await waitFor(request(current, {
@@ -132,6 +151,8 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
       }
       activeResponse = response;
       signal.throwIfAborted();
+      waitingForResponse = false;
+      activity();
       if (response.redirected) throw new Error('Unexpected automatic download redirect');
       if (!redirectStatuses.has(response.status)) {
         if (response.status !== 200) throw new Error(`Download failed with HTTP status ${response.status} (${new URL(current).hostname})`);
@@ -153,6 +174,8 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
   } finally {
     parentSignal?.removeEventListener('abort', cancelled);
     clearTimeout(timeout);
+    clearTimeout(idleTimeout);
+    downloadActivity.delete(signal);
     controller.abort();
     if (activeResponse?.body && !activeResponse.body.locked) void activeResponse.body.cancel().catch(() => {});
   }
@@ -192,6 +215,7 @@ export async function readReleaseBody(response: Response, limit: number, signal:
       const { value, done } = chunk;
       signal.throwIfAborted();
       if (done) break;
+      if (value.byteLength > 0) downloadActivity.get(signal)?.(value.byteLength);
       size += value.byteLength;
       if (size > limit || (declaredSize !== undefined && size > declaredSize)) throw new Error('Download exceeds declared size');
       // Settle an in-flight local write before releasing its caller's file handle or lock.

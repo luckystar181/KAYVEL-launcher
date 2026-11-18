@@ -49,8 +49,11 @@ test('untrusted release URLs and invalid limits stop before requesting anything'
   for (const invalid of [0, -1, 1.5, NaN, Infinity, 1_000_000_001]) {
     await assert.rejects(downloadReleaseBytes(url, invalid, options), /size limit/);
   }
-  for (const timeoutMs of [0, -1, 1.5, NaN, Infinity, 180_001]) {
+  for (const timeoutMs of [0, -1, 1.5, NaN, Infinity, 3_600_001]) {
     await assert.rejects(downloadReleaseBytes(url, payload.length, { ...options, timeoutMs }), /timeout/);
+  }
+  for (const idleTimeoutMs of [0, -1, 1.5, NaN, Infinity, 180_001]) {
+    await assert.rejects(downloadReleaseBytes(url, payload.length, { ...options, idleTimeoutMs }), /timeout/);
   }
   assert.equal(calls, 0);
 });
@@ -272,7 +275,7 @@ for (const mode of ['request', 'stream', 'http', 'timeout']) {
       assert.match(error.message, /release-assets\.githubusercontent\.com/);
       assert.doesNotMatch(error.message, /https:|temporary|fixture|private|example\/file/);
       if (mode === 'http') assert.match(error.message, /HTTP status 503/);
-      else if (mode === 'timeout') assert.match(error.message, /timed out/);
+      else if (mode === 'timeout') assert.match(error.message, /превышен общий лимит/);
       else {
         assert.match(error.message, /ECONNRESET/);
         assert.equal(error.cause, failure);
@@ -319,6 +322,117 @@ test('chunked identity bodies and an explicitly empty body respect the byte limi
   }), Buffer.alloc(0));
 });
 
+test('a progressing download may exceed the old three-minute total limit without another request', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let stream;
+  let transportSignal;
+  const calls = [];
+  const pending = downloadReleaseBytes(url, 5, {
+    request: async (requested, options) => {
+      calls.push(requested);
+      transportSignal = options.signal;
+      if (requested === url) return new Response(null, { status: 302, headers: { location: cdn } });
+      return new Response(new ReadableStream({ start(controller) { stream = controller; } }));
+    }
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  for (let index = 0; index < 5; index++) {
+    t.mock.timers.tick(60_000);
+    assert.equal(transportSignal.aborted, false);
+    stream.enqueue(Uint8Array.of(index));
+    await new Promise(resolve => setImmediate(resolve));
+  }
+  stream.close();
+  assert.deepEqual(await pending, Buffer.from([0, 1, 2, 3, 4]));
+  assert.deepEqual(calls, [url, cdn]);
+});
+
+test('idle response timeout names the failing host and received bytes without exposing the signed URL', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let stream;
+  let signal;
+  let calls = 0;
+  let cancelled = false;
+  const pending = downloadReleaseBytes(url, 10, {
+    request: async (requested, options) => {
+      calls++;
+      signal = options.signal;
+      if (requested === url) return new Response(null, { status: 302, headers: { location: cdn } });
+      return new Response(new ReadableStream({
+        start(controller) { stream = controller; },
+        cancel() { cancelled = true; }
+      }));
+    }
+  });
+  const rejected = assert.rejects(pending, error => {
+    assert.match(error.message, /release-assets\.githubusercontent\.com/);
+    assert.match(error.message, /не поступают новые данные 180 с; получено 2 байт/);
+    assert.doesNotMatch(error.message, /https:|temporary|fixture|example\/file/);
+    return true;
+  });
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(120_000);
+  stream.enqueue(Uint8Array.of(1, 2));
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(179_999);
+  assert.equal(signal.aborted, false);
+  // Empty chunks must not keep an otherwise stalled connection alive.
+  stream.enqueue(new Uint8Array());
+  await new Promise(resolve => setImmediate(resolve));
+  t.mock.timers.tick(1);
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(cancelled, true);
+  assert.equal(calls, 2);
+});
+
+test('idle timeout bounds waiting for headers separately from the overall transfer limit', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let signal;
+  let complete;
+  let calls = 0;
+  const pending = downloadReleaseBytes(url, payload.length, {
+    request: (_requested, options) => {
+      calls++;
+      signal = options.signal;
+      return new Promise(resolve => { complete = resolve; });
+    }
+  });
+  const rejected = assert.rejects(pending, /сервер не прислал ответ 180 с; получено 0 байт/);
+  t.mock.timers.tick(180_000);
+  await rejected;
+  assert.equal(signal.aborted, true);
+  assert.equal(calls, 1);
+  const tracked = trackedResponse();
+  complete(tracked.response);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(tracked.cancelled(), true);
+});
+
+test('the overall limit still stops a continuously progressing transfer', async t => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let stream;
+  let signal;
+  const pending = downloadReleaseBytes(url, 10, {
+    timeoutMs: 1000, idleTimeoutMs: 500,
+    request: async (_requested, options) => {
+      signal = options.signal;
+      return new Response(new ReadableStream({ start(controller) { stream = controller; } }));
+    }
+  });
+  const rejected = assert.rejects(pending, /превышен общий лимит.*получено 3 байт/);
+  await new Promise(resolve => setImmediate(resolve));
+  for (let index = 0; index < 3; index++) {
+    t.mock.timers.tick(250);
+    stream.enqueue(Uint8Array.of(index));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(signal.aborted, false);
+  }
+  t.mock.timers.tick(250);
+  await rejected;
+  assert.equal(signal.aborted, true);
+});
+
 test('a stalled request times out without retrying and cancels a late response', { timeout: 2000 }, async () => {
   let calls = 0;
   let signal;
@@ -330,7 +444,7 @@ test('a stalled request times out without retrying and cancels a late response',
       signal = options.signal;
       return new Promise(resolve => { complete = resolve; });
     }
-  }), /timed out/);
+  }), /превышен общий лимит/);
   assert.equal(calls, 1);
   assert.equal(signal.aborted, true);
   const tracked = trackedResponse();
@@ -348,7 +462,7 @@ test('a late request rejection after timeout is handled without another request'
       calls++;
       return new Promise((resolve, reject) => { fail = reject; });
     }
-  }), /timed out/);
+  }), /превышен общий лимит/);
   fail(new Error('fictional late connection failure'));
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(calls, 1);
@@ -379,7 +493,7 @@ test('timeout cancels the network while waiting for an in-flight local write to 
       await writing;
     });
   }, { timeoutMs: 40, request: async () => response });
-  const rejection = assert.rejects(pending.finally(() => { settled = true; }), /timed out/);
+  const rejection = assert.rejects(pending.finally(() => { settled = true; }), /превышен общий лимит/);
   try {
     await started;
     await aborted;
@@ -408,7 +522,7 @@ test('a stalled body is cancelled under the same deadline as its redirect', { ti
         cancel() { cancelled = true; }
       }));
     }
-  }), /timed out/);
+  }), /превышен общий лимит/);
   assert.equal(calls, 2);
   assert.equal(signals[0], signals[1]);
   assert.equal(signals[0].aborted, true);
@@ -423,7 +537,7 @@ test('a stalled redirect cancellation cannot hang forever or request the next UR
       calls++;
       return new Response(new ReadableStream({ cancel: () => new Promise(() => {}) }), { status: 302, headers: { location: cdn } });
     }
-  }), /timed out/);
+  }), /превышен общий лимит/);
   assert.equal(calls, 1);
 });
 

@@ -25,8 +25,8 @@ test('setup creates missing output parents but never reuses an existing build', 
 
 test('setup payload is pinned to a separate v3S launcher release, size and SHA-256', () => {
   const settings = installerSettings(123, 'a'.repeat(64));
-  assert.equal(settings.Url, 'https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.4-v3S/KAYVEL-v3S-windows-x64.zip');
-  assert.equal(settings.Version, 'v0.2.4-v3S');
+  assert.equal(settings.Url, 'https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.5-v3S/KAYVEL-v3S-windows-x64.zip');
+  assert.equal(settings.Version, 'v0.2.5-v3S');
   assert.equal(settings.Bytes, 123);
   assert.equal(settings.Sha256, 'a'.repeat(64));
   for (const bytes of [0, -1, 1.5, NaN, 1_000_000_001]) assert.throws(() => installerSettings(bytes, 'a'.repeat(64)));
@@ -41,7 +41,7 @@ test('setup packages a minimal fixture with Windows PowerShell and embeds the ve
   await writeFile(join(portable, 'KAYVEL.exe'), 'fixture-not-executable', { flag: 'wx' });
   await writeFile(join(main, 'main.js'), '// fixture', { flag: 'wx' });
   await writeFile(join(main, 'release.js'), '// /releases/download/v0.2.0-v3S/manifest.json', { flag: 'wx' });
-  await writeFile(join(portable, 'resources', 'app', 'package.json'), JSON.stringify({ version: '0.2.4' }), { flag: 'wx' });
+  await writeFile(join(portable, 'resources', 'app', 'package.json'), JSON.stringify({ version: '0.2.5' }), { flag: 'wx' });
   const output = join(root, 'missing-parent', 'setup');
   const result = await packageSetup(portable, output);
   const zip = await readFile(result.zip);
@@ -51,6 +51,7 @@ test('setup packages a minimal fixture with Windows PowerShell and embeds the ve
   assert.equal(result.settings.Bytes, zip.length);
   assert.equal(result.settings.Sha256, createHash('sha256').update(zip).digest('hex'));
   assert.equal(exe.includes(Buffer.from(JSON.stringify(result.settings, null, 2))), true);
+  assert.equal(exe.includes(zip), true, 'the entire payload must be embedded, not downloaded');
   const checksums = await readFile(join(output, 'SHA256SUMS.txt'), 'utf8');
   assert.match(checksums, new RegExp(createHash('sha256').update(exe).digest('hex') + '  KAYVEL-Setup-v3S.exe'));
   assert.ok(checksums.includes(result.settings.Sha256));
@@ -68,8 +69,9 @@ test('native installer rejects bad ZIPs, preserves occupied paths and creates an
   assert.equal(tests.status, 0, tests.stdout + tests.stderr);
   assert.match(tests.stdout, /assertions passed/);
   const source = await readFile(new URL('../installer/Bootstrap.cs', import.meta.url), 'utf8');
-  assert.match(source, /AllowAutoRedirect = false/);
-  assert.match(source, /CancellationTokenSource\.CreateLinkedTokenSource/);
+  assert.match(source, /GetManifestResourceStream\("launcher-payload\.zip"\)/);
+  assert.doesNotMatch(source, /HttpWebRequest|WebRequest\.Create|InstallerCore\.Download|GetResponseAsync/);
+  assert.match(source, /ExtractVerified\(Stream file/);
   assert.match(source, /FileMode\.CreateNew/);
   assert.match(source, /Directory\.Move\(staging, installed\)/);
   assert.doesNotMatch(source, /Directory\.Delete\([^)]*,\s*true\)/);

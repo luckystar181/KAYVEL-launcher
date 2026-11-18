@@ -10,13 +10,30 @@ internal static class InstallerTests
 {
     private static int assertions;
     private sealed class QuietProgress : IProgress<int> { public void Report(int value) { if (value < 0 || value > 100) throw new Exception("Invalid percentage"); } }
+    private sealed class CancelingStream : MemoryStream
+    {
+        private readonly CancellationTokenSource cancellation;
+        public CancelingStream(byte[] bytes, CancellationTokenSource cancellation) : base(bytes) { this.cancellation = cancellation; }
+        public override int Read(byte[] buffer, int offset, int count)
+        {
+            int received = base.Read(buffer, offset, count);
+            cancellation.Cancel();
+            return received;
+        }
+    }
+    private sealed class CancelingProgress : IProgress<int>
+    {
+        private readonly CancellationTokenSource cancellation;
+        public CancelingProgress(CancellationTokenSource cancellation) { this.cancellation = cancellation; }
+        public void Report(int value) { cancellation.Cancel(); }
+    }
     private static void Check(bool condition) { assertions++; if (!condition) throw new Exception("Assertion " + assertions + " failed"); }
     private static void Refuses(Action action) { bool failed = false; try { action(); } catch (Exception) { failed = true; } Check(failed); }
     private static Settings Config(string zip)
     {
         using (var file = File.OpenRead(zip))
         using (var sha = SHA256.Create()) return new Settings {
-            Version = "v0.2.4-v3S", Url = "https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.4-v3S/KAYVEL-v3S-windows-x64.zip",
+            Version = "v0.2.5-v3S", Url = "https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.5-v3S/KAYVEL-v3S-windows-x64.zip",
             Sha256 = InstallerCore.Hex(sha.ComputeHash(file)), Bytes = file.Length
         };
     }
@@ -52,6 +69,33 @@ internal static class InstallerTests
         Settings settings = Config(valid);
         settings.Validate();
         var progress = new QuietProgress();
+        using (var stream = new MemoryStream(File.ReadAllBytes(valid)))
+        {
+            stream.Position = 3;
+            string streamed = Path.Combine(root, "streamed");
+            InstallerCore.ExtractVerified(stream, settings, streamed, progress, CancellationToken.None);
+            Check(stream.CanRead);
+            Check(File.ReadAllText(Path.Combine(streamed, "KAYVEL.exe")) == "fixture-not-executable");
+            settings.Bytes++;
+            string wrongSize = Path.Combine(root, "wrong-size");
+            Refuses(() => InstallerCore.ExtractVerified(stream, settings, wrongSize, progress, CancellationToken.None));
+            Check(!Directory.Exists(wrongSize));
+            settings.Bytes--;
+        }
+        Refuses(() => InstallerCore.ExtractVerified((Stream)null, settings, Path.Combine(root, "missing-resource"), progress, CancellationToken.None));
+        var hashCancel = new CancellationTokenSource();
+        string hashCanceledDest = Path.Combine(root, "hash-canceled");
+        using (var stream = new CancelingStream(File.ReadAllBytes(valid), hashCancel))
+        {
+            Refuses(() => InstallerCore.ExtractVerified(stream, settings, hashCanceledDest, progress, hashCancel.Token));
+            Check(stream.CanRead);
+        }
+        Check(!Directory.Exists(hashCanceledDest));
+        var extractCancel = new CancellationTokenSource();
+        string extractCanceledDest = Path.Combine(root, "extract-canceled");
+        Refuses(() => InstallerCore.ExtractVerified(valid, settings, extractCanceledDest, new CancelingProgress(extractCancel), extractCancel.Token));
+        Check(File.Exists(Path.Combine(extractCanceledDest, "KAYVEL.exe")));
+        Check(!File.Exists(Path.Combine(extractCanceledDest, "resources/app/dist/main/main.js")));
         string dest = Path.Combine(root, "installed");
         InstallerCore.ExtractVerified(valid, settings, dest, progress, CancellationToken.None);
         Check(File.ReadAllText(Path.Combine(dest, "KAYVEL.exe")) == "fixture-not-executable");
