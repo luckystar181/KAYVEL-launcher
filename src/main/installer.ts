@@ -6,6 +6,8 @@ import { Manifest, ManagedFile, validReleaseUrl, verifyManifest } from './manife
 import { downloadReleaseBytes, readReleaseBody, withReleaseDownload } from './release-download.js';
 import { stageProgress, type ReportProgress } from './preparation-progress.js';
 import { assertOptionalDestinationsFree, hasOptionalModsMarker, inspectOptionalMod, isSwitchable, optionalModsMarker, optionalModsMarkerPath } from './optional-mod-files.js';
+import { acquireGameDirectoryLock } from './game-directory-lock.js';
+export { acquireGameDirectoryLock } from './game-directory-lock.js';
 
 async function regularFile(path: string): Promise<boolean> {
   try {
@@ -61,34 +63,6 @@ async function entryExists(path: string): Promise<boolean> {
     if ((error as NodeJS.ErrnoException).code === 'ENOENT') return false;
     throw error;
   }
-}
-
-export async function acquireGameDirectoryLock(root: string): Promise<() => Promise<void>> {
-  await safeDirectory(root);
-  const meta = join(root, '.kayvel');
-  await safeDirectory(meta);
-  const lock = join(meta, 'lock');
-  try { await mkdir(lock); }
-  catch (error) {
-    if ((error as NodeJS.ErrnoException).code === 'EEXIST') {
-      throw new Error('Папка игры заблокирована: игра или установка уже выполняется, либо осталась старая блокировка.');
-    }
-    throw error;
-  }
-  try {
-    if (await entryExists(join(meta, INCOMPLETE_INSTALL))) {
-      throw new Error('Обнаружена незавершённая установка модпака. Не запускайте игру и не удаляйте файлы .kayvel до проверки.');
-    }
-  } catch (error) {
-    await rmdir(lock);
-    throw error;
-  }
-  let released = false;
-  return async () => {
-    if (released) return;
-    await rmdir(lock);
-    released = true;
-  };
 }
 
 async function hashFile(path: string): Promise<string> {

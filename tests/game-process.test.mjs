@@ -126,8 +126,10 @@ test('closing a lock-owning process leaves the lock while its child can still ru
     const script = `
       import { spawn } from 'node:child_process';
       import { acquireGameDirectoryLock } from ${JSON.stringify(moduleUrl)};
-      await acquireGameDirectoryLock(${JSON.stringify(root)});
+      import { watchLockedGame } from ${JSON.stringify(new URL('../dist/main/game-process.js', import.meta.url).href)};
+      const release = await acquireGameDirectoryLock(${JSON.stringify(root)});
       const child = spawn(process.execPath, ['-e', 'setTimeout(() => {}, 30000)'], { detached: true, stdio: 'ignore' });
+      watchLockedGame(child, release, () => {}, () => {});
       child.unref();
       console.log(child.pid);
     `;

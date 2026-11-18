@@ -46,7 +46,7 @@ const strings = {
     description: 'Пространство для своей команды. Всё необходимое - в одном месте.',
     install: 'УСТ. МОДПАК', play: 'ИГРАТЬ', settings: 'Настройки',
     preparing: 'Подготовка файлов…', noRelease: 'Сборка ещё не опубликована',
-    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.0 · v3S',
+    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.1 · v3S',
     language: 'Язык', back: 'Назад', gameFolder: 'Папка Minecraft с модами',
     stage: 'СОСТОЯНИЕ ПРОЕКТА', pack: 'Модпак', game: 'Minecraft',
     soon: 'В разработке', waiting: 'Ожидает публикации', available: 'Подписанный релиз настроен',
@@ -62,7 +62,7 @@ const strings = {
     description: 'A place for your team. Everything you need in one place.',
     install: 'INSTALL', play: 'PLAY', settings: 'Settings',
     preparing: 'Preparing files…', noRelease: 'No modpack release has been published',
-    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.0 · v3S',
+    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.1 · v3S',
     language: 'Language', back: 'Back', gameFolder: 'Modded Minecraft folder',
     stage: 'PROJECT STATUS', pack: 'Modpack', game: 'Minecraft',
     soon: 'In development', waiting: 'Awaiting release', available: 'Signed release configured',
@@ -207,7 +207,7 @@ function App() {
       const profile = await window.kayvel.saveLocalSkin(new Uint8Array(await selected.arrayBuffer()), skinModel);
       showLocalProfile(profile);
       setSkinFile(null);
-      setSkinMessage(lang === 'ru' ? 'Копия сохранена локально. В игру и другим игрокам она пока не передана.' : 'A local copy was saved. It has not been installed in the game or shared with other players.');
+      setSkinMessage(lang === 'ru' ? 'Копия сохранена. Скин применится при следующем запуске сборки. Видимость другим игрокам не гарантируется.' : 'Copy saved. The skin will be applied the next time you launch the modpack. Other players may not see it.');
     } catch (error) {
       setSkinMessage(error instanceof Error ? error.message : 'Не удалось сохранить скин.');
     } finally { setBusy(false); }
@@ -307,7 +307,7 @@ function App() {
           </section>
         </div>
         <div className="launch-bar">
-          <div className="launch-copy"><span className="eyebrow">{t.game}</span><strong>{status?.gameRunning ? t.running : status?.neoforgeReady ? t.neoReady : t.neoWaiting}</strong><small role="status">{message || (status?.releaseConfigured ? t.downloadReady : t.noRelease)}</small><small>{lang === 'ru' ? 'Java → Minecraft → NeoForge → сборка с модами.' : 'Java → Minecraft → NeoForge → modpack.'}</small></div>
+          <div className="launch-copy"><span className="eyebrow">{t.game}</span><strong>{status?.gameRunning ? t.running : status?.neoforgeReady ? t.neoReady : t.neoWaiting}</strong>{(message || !status?.gameRunning) && <small role="status">{message || (status?.releaseConfigured ? t.downloadReady : t.noRelease)}</small>}<small>{lang === 'ru' ? 'Java → Minecraft → NeoForge → сборка с модами.' : 'Java → Minecraft → NeoForge → modpack.'}</small></div>
           <div className="actions"><button className="play" disabled={!status?.releaseConfigured || busy || status.preparingVanilla || status.preparingNeoForge || status.installing || status.modSwitching || status.gameRunning || !profileReady || !savedNickname || nickname !== savedNickname} onClick={() => void downloadAndPlay()}>{status?.gameRunning ? t.running : busy ? t.preparing : status?.neoforgeReady ? t.play : (lang === 'ru' ? 'Скачать и играть' : 'Download and play')}<span>→</span></button></div>
         </div>
         {progress && !status?.gameRunning && <PreparationMeter progress={progress} lang={lang} />}
@@ -319,7 +319,7 @@ function App() {
             <div className="skin-actions"><label className="skin-upload">{t.chooseSkin}<input type="file" accept="image/png" disabled={busy} onChange={event => { setSkinFile(event.currentTarget.files?.[0] ?? null); event.currentTarget.value = ''; setSkinMessage(''); }} /></label></div>
             <div className="skin-meta"><label htmlFor="skin-model">{lang === 'ru' ? 'Модель' : 'Model'}</label><select id="skin-model" disabled={busy} value={skinModel} onChange={event => setSkinModel(event.target.value as 'classic' | 'slim')}><option value="classic">Classic</option><option value="slim">Slim</option></select></div>
             <button className="skin-submit" disabled={!profileReady || busy || !savedNickname || nickname !== savedNickname || (!skinFile && (!localSkin || (skinModel === localSkin.model && localSkin.copyReady)))} onClick={() => void saveSkinLocally()}>{localSkin ? (lang === 'ru' ? 'Сохранить изменения' : 'Save changes') : (lang === 'ru' ? 'Сохранить скин' : 'Save skin')}</button>
-            <p className="skin-note">{lang === 'ru' ? 'Сначала сохраните ник. Копия сохраняется только в лаунчере: в игру не установлена и другим игрокам не передаётся.' : 'Save your name first. The copy stays in the launcher: it is not installed in the game or shared with other players.'}</p>
+            <p className="skin-note">{lang === 'ru' ? 'Сначала сохраните ник. Выбранный PNG применяется локально при следующем запуске сборки через CustomSkinLoader. Скин не загружается на сторонние сайты; другие игроки могут его не видеть.' : 'Save your name first. Your PNG is applied locally through CustomSkinLoader the next time you launch the modpack. It is not uploaded to third-party sites; other players may not see it.'}</p>
             {localSkin && <div className="skin-copy-path"><span>{localSkin.copyReady ? (lang === 'ru' ? 'Копия PNG:' : 'PNG copy:') : (lang === 'ru' ? 'Копия отсутствует или изменена извне:' : 'Copy is missing or changed externally:')}</span><code>{localSkin.copyPath}</code></div>}
             <p className="skin-note" role="status">{skinMessage}</p>
           </div></div>

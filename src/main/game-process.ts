@@ -1,4 +1,5 @@
 import type { ChildProcess } from 'node:child_process';
+import type { GameDirectoryLock } from './game-directory-lock.js';
 
 export type GameExit = { code: number | null; gamePath: string };
 
@@ -13,7 +14,7 @@ export function createGameExitReporter(gamePath: string, notify: (exit: GameExit
 
 export function watchLockedGame(
   child: ChildProcess,
-  releaseLock: () => Promise<void>,
+  releaseLock: GameDirectoryLock,
   onExit: (code: number | null) => void,
   onError: (error: unknown) => void
 ): void {
@@ -32,5 +33,9 @@ export function watchLockedGame(
     onError(error);
     if (child.pid === undefined) finish(-1);
   });
+  if (child.pid !== undefined) {
+    try { releaseLock.trackChild?.(child.pid); }
+    catch (error) { onError(error); }
+  }
   if (child.exitCode !== null || child.signalCode !== null) finish(child.exitCode);
 }

@@ -12,6 +12,7 @@ import { requireAvailableJava21 } from './game-launch-policy.js';
 import { createMemorySettingsStore } from './memory-settings.js';
 import { gamePreparationUnavailable } from './game-preparation.js';
 import { createLocalProfileStore } from './local-profile.js';
+import { applyLocalSkin } from './game-skin.js';
 import { createGameBestStore } from './game-best.js';
 import { instancePath, prepareInstance, preparedJava, verifyPreparation } from './prepare-instance.js';
 import { stageProgress, type PreparationProgress } from './preparation-progress.js';
@@ -206,11 +207,13 @@ async function playPreparedNeoForge(language: unknown) {
   let gameObserved = false;
   preparingNeoForge = true;
   try {
-    const name = validateNickname(localProfile.read().nickname);
+    const profile = localProfile.read();
+    const name = validateNickname(profile.nickname);
     const memoryMb = memorySettings.read().memoryMb;
     const gamePath = neoforgePath();
     releaseGameLock = await acquireGameDirectoryLock(gamePath);
     await verifyPreparation(gamePath, MANIFEST_PUBLIC_KEY_PEM, reportPreparation);
+    applyLocalSkin(gamePath, profile);
     const java = preparedJava(gamePath, app.getPath('userData'));
     stageProgress(reportPreparation, 'launch', 'Запуск Minecraft');
     gameRunning = true;
@@ -233,7 +236,7 @@ async function playPreparedNeoForge(language: unknown) {
       gameObserved = true;
       throw new Error('Не удалось подтвердить наблюдение за процессом игры; блокировка сохранена до проверки.');
     }
-    return { ok: true, message: `NeoForge запущен с локальным ником ${name}. Допуск на сервер проверяется сервером.` };
+    return { ok: true, message: '' };
   } catch (error) {
     stageProgress(reportPreparation, 'error', 'Запуск остановлен. Файлы сохранены для проверки.');
     if (!gameObserved) {
@@ -269,7 +272,7 @@ ipcMain.handle('kayvel:play-vanilla', async (event, language: unknown) => {
     child.once('exit', code => reportExit(code));
     child.once('error', () => reportExit(-1));
     if (child.exitCode !== null || child.signalCode !== null) reportExit(child.exitCode);
-    return { ok: true, message: `Minecraft запущен с локальным ником ${name}. Допуск на сервер проверяется на сервере.` };
+    return { ok: true, message: '' };
   } catch (error) {
     preparingVanilla = false;
     gameRunning = false;

@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { spawn } from 'node:child_process';
 import { createHash, generateKeyPairSync, sign } from 'node:crypto';
-import { lstat, mkdir, mkdtemp, readFile, readdir, rmdir, rm, writeFile } from 'node:fs/promises';
+import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -131,8 +131,8 @@ for (const phase of ['after-first-link', 'before-marker-unlink']) {
       await assertPreserved();
       assert.equal((await lstat(lock)).isDirectory(), true);
 
-      // Only this test's own empty lock is removed to exercise the marker independently.
-      await rmdir(lock);
+      // Remove only this fixture's lock to exercise the incomplete marker independently.
+      await rm(lock, { recursive: true });
       await assert.rejects(acquireGameDirectoryLock(root), /незавершённая установка/);
       await assert.rejects(installRelease(root, manifestUrl, publicPem), /незавершённая установка/);
       await assert.rejects(lstat(lock), { code: 'ENOENT' });

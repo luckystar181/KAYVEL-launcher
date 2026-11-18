@@ -41,7 +41,7 @@ export function SkinPreview3D({ file, model, lang }: { file: File | null; model:
   }, [file, model]);
 
   return <div className="skin-stage skin-stage-3d" ref={stage} aria-label={lang === 'ru' ? 'Трёхмерный предпросмотр скина' : '3D skin preview'}>
-    {!file && <span className="skin-stage-hint">{lang === 'ru' ? 'Выберите PNG или найдите скин по нику' : 'Choose a PNG or find a skin by name'}</span>}
+    {!file && <span className="skin-stage-hint">{lang === 'ru' ? 'Выберите PNG-файл скина' : 'Choose a skin PNG file'}</span>}
     {error && <span className="skin-stage-error" role="alert">{lang === 'ru' ? 'Не удалось показать скин в 3D. Проверьте PNG и поддержку графики.' : 'Could not display 3D skin. Check the PNG and graphics support.'}</span>}
   </div>;
 }
