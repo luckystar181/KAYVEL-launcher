@@ -100,6 +100,27 @@ test('lock, incomplete installation and legacy provenance prevent switching', as
   });
 });
 
+for (const markerType of ['file', 'directory', 'dangling-link']) {
+  test(`unfinished preparation blocks switching without changing mods: ${markerType}`, async () => {
+    await fixture(async f => {
+      await install(f);
+      await mkdir(join(f.root, '.preparation'));
+      const marker = join(f.root, '.preparation', 'incomplete.json');
+      if (markerType === 'file') await writeFile(marker, 'fixture');
+      if (markerType === 'directory') await mkdir(marker);
+      if (markerType === 'dangling-link') await symlink(join(f.dir, 'absent-directory'), marker, process.platform === 'win32' ? 'junction' : 'dir');
+      const before = f.requests.length;
+      assert.ok((await readModSwitches(f.root, f.publicKey)).every(item => item.state === 'unavailable'));
+      await assert.rejects(setModEnabled(f.root, f.publicKey, SWITCHABLE_MODS[0].id, false), /Подготовка не завершена/);
+      await assert.rejects(assertModSwitchProvenance(f.root, f.publicKey, f.bytes), /состояние установки изменилось/);
+      assert.equal(f.requests.length, before);
+      assert.deepEqual(await readFile(f.enabled(SWITCHABLE_MODS[0])), f.files[0].content);
+      await assert.rejects(lstat(f.disabled(SWITCHABLE_MODS[0])), { code: 'ENOENT' });
+      assert.ok(await lstat(marker));
+    });
+  });
+}
+
 test('modified file and ambiguous duplicate block switching and verification without repair', async () => {
   await fixture(async f => {
     await install(f);

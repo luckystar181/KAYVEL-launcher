@@ -135,7 +135,7 @@ test('rejects invalid Git tags and repository names before creating output', asy
 test('requires an explicit rights confirmation and blocks known restricted filenames by default', async t => {
   const f = await fixture(t);
   await assert.rejects(prepareGithubRelease({ ...f.args, confirmRights: false }), /rights/i);
-  for (const name of ['RAGDOLL_CORPSE-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar']) {
+  for (const name of ['RAGDOLL_CORPSE-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar', 'sable_player_ragdoll-1.21.1-0.8.1.jar']) {
     const path = join(f.source, 'mods', name);
     await writeFile(path, 'fictional file');
     await assert.rejects(prepareGithubRelease(f.args), /no-redistribution/i);
@@ -145,9 +145,9 @@ test('requires an explicit rights confirmation and blocks known restricted filen
   }
 });
 
-test('includes the two restricted filenames only with both explicit confirmations', async t => {
+test('includes restricted filenames and the new 0.8.1 variant only with both explicit confirmations', async t => {
   const f = await fixture(t);
-  const names = ['RAGDOLL_CORPSE-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar'];
+  const names = ['RAGDOLL_CORPSE-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar', 'sable_player_ragdoll-1.21.1-0.8.1.jar'];
   for (const name of names) await writeFile(join(f.source, 'mods', name), `fictional ${name}`);
   await assert.rejects(prepareGithubRelease({ ...f.args, confirmRagdollPermissions: 'true' }), /no-redistribution/i);
   await assert.rejects(prepareGithubRelease({ ...f.args, confirmRights: 'true', confirmRagdollPermissions: true }), /rights/i);
@@ -155,7 +155,7 @@ test('includes the two restricted filenames only with both explicit confirmation
   await absent(f.args.output);
   f.args.confirmRagdollPermissions = true;
   const release = await prepared(f);
-  assert.equal(release.files, 4);
+  assert.equal(release.files, contents.size + names.length);
   for (const name of names) {
     const file = release.manifest.files.find(item => item.path === `mods/${name}`);
     assert.ok(file);
@@ -171,13 +171,13 @@ test('rejects unexpected directories, unsafe names, empty files, and linked dire
   const extra = join(f.source, 'saves');
   await mkdir(extra);
   await writeFile(join(extra, 'keep.txt'), 'user data');
-  await assert.rejects(prepareGithubRelease(f.args), /only mods and resourcepacks/i);
+  await assert.rejects(prepareGithubRelease(f.args), /only mods, resourcepacks/i);
   assert.equal(await readFile(join(extra, 'keep.txt'), 'utf8'), 'user data');
   await rm(extra, { recursive: true });
 
   const invalid = join(f.source, 'mods', 'name with spaces.jar');
   await writeFile(invalid, 'fictional');
-  await assert.rejects(prepareGithubRelease(f.args), /invalid managed file/i);
+  await assert.rejects(prepareGithubRelease(f.args), /unsupported managed path/i);
   await rm(invalid);
   const empty = join(f.source, 'mods', 'empty.jar');
   await writeFile(empty, '');
@@ -238,7 +238,7 @@ test('CLI prepares only with all required arguments and keeps private material o
 
 test('CLI requires a separate explicit confirmation for restricted filenames', async t => {
   const f = await fixture(t);
-  const names = ['ragdoll_corpse-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar'];
+  const names = ['ragdoll_corpse-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar', 'sable_player_ragdoll-1.21.1-0.8.1.jar'];
   for (const name of names) await writeFile(join(f.source, 'mods', name), `fictional ${name}`);
   const args = ['--source', f.source, '--repo', f.args.repo, '--tag', f.args.tag, '--private-key', f.privateKeyPath, '--output', f.args.output];
   await assert.rejects(executeFile(process.execPath, [cli, ...args, '--confirm-rights']), error => /--confirm-ragdoll-permissions/.test(error.stderr));

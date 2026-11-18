@@ -21,13 +21,18 @@ async function safeExistingDirectory(path: string): Promise<boolean> {
   return true;
 }
 
+async function preparationIncomplete(root: string): Promise<boolean> {
+  return await safeExistingDirectory(join(root, '.preparation'))
+    && Boolean(await entry(join(root, '.preparation', 'incomplete.json')));
+}
+
 const unavailable = (message: string): ModSwitchStatus[] => SWITCHABLE_MODS.map(mod => ({ id: mod.id, state: 'unavailable', message }));
 
 export async function readModSwitches(root: string, publicKeyPem: string): Promise<ModSwitchStatus[]> {
   if (!await safeExistingDirectory(root) || !await safeExistingDirectory(join(root, '.kayvel'))) {
     return unavailable('Нужна новая установка подписанного модпака с поддержкой переключателей.');
   }
-  if (await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
+  if (await preparationIncomplete(root) || await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
     return unavailable('Установка не завершена; сначала проверьте состояние файлов вручную.');
   }
   const installed = await getInstalledManifest(join(root, '.kayvel'), publicKeyPem);
@@ -43,7 +48,7 @@ export async function readModSwitches(root: string, publicKeyPem: string): Promi
 }
 
 export async function assertModSwitchProvenance(root: string, publicKeyPem: string, expectedBytes: Buffer): Promise<void> {
-  if (!await safeExistingDirectory(root) || !await safeExistingDirectory(join(root, '.kayvel')) ||
+  if (!await safeExistingDirectory(root) || !await safeExistingDirectory(join(root, '.kayvel')) || await preparationIncomplete(root) ||
       await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
     throw new Error('Переключение недоступно: состояние установки изменилось.');
   }
@@ -62,6 +67,7 @@ export async function setModEnabled(root: string, publicKeyPem: string, id: unkn
   }
   const releaseLock = await acquireGameDirectoryLock(root);
   try {
+    if (await preparationIncomplete(root)) throw new Error('Подготовка не завершена; переключение модов недоступно до проверки файлов.');
     const installed = await getInstalledManifest(join(root, '.kayvel'), publicKeyPem);
     if (!installed || !await hasOptionalModsMarker(root, installed.bytes)) {
       throw new Error('Переключение недоступно: происхождение файлов старой установки не подтверждено.');

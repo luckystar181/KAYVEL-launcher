@@ -7,6 +7,7 @@ import { spawnSync } from 'node:child_process';
 import { createReadStream, existsSync, readdirSync } from 'node:fs';
 import { link, lstat, mkdir, readFile, unlink, writeFile } from 'node:fs/promises';
 import { sameKnownFile } from './file-identity.js';
+import { memoryLaunchOptions } from './memory-settings.js';
 import { assertGamePreparationAllowed } from './game-preparation.js';
 import { dirname, join } from 'node:path';
 
@@ -176,8 +177,9 @@ export async function installVanilla(directory: string): Promise<void> {
   }
 }
 
-export async function launchVanilla(directory: string, name: string, javaPath: string) {
+export async function launchVanilla(directory: string, name: string, javaPath: string, memoryMb = 6144) {
   return launch({
+    ...memoryLaunchOptions(memoryMb),
     gamePath: directory,
     resourcePath: directory,
     version: VANILLA_VERSION,

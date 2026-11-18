@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import { lstat, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { memoryLaunchOptions } from '../dist/main/memory-settings.js';
 import ts from 'typescript';
 
 const require = createRequire(import.meta.url);
@@ -14,6 +15,7 @@ test('NeoForge launch options use only a local profile and preserve the process 
     '@xmcl/core': { launch: async options => options },
     'node:child_process': { spawn: (...args) => { calls.push(args); return child; } },
     './vanilla.js': { validateNickname: value => value, offlineUUID: () => 'fictional-offline-uuid', VANILLA_VERSION: '1.21.1' },
+    './memory-settings.js': { memoryLaunchOptions },
     './game-preparation.js': { assertGamePreparationAllowed() { throw new Error('No installation authorized'); } }
   };
   const source = await readFile(new URL('../dist/main/neoforge.js', import.meta.url), 'utf8');
@@ -25,7 +27,9 @@ test('NeoForge launch options use only a local profile and preserve the process 
     return require(name);
   } });
   let observed;
-  const options = await exports.launchNeoForge('fictional-game', 'LocalPlayer', 'fictional-java', process => { observed = process; });
+  const options = await exports.launchNeoForge('fictional-game', 'LocalPlayer', 'fictional-java', process => { observed = process; }, 8192);
+  assert.equal(options.minMemory, 1024);
+  assert.equal(options.maxMemory, 8192);
   assert.equal(options.gamePath, 'fictional-game');
   assert.equal(options.javaPath, 'fictional-java');
   assert.equal(options.gameProfile.name, 'LocalPlayer');

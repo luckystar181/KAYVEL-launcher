@@ -5,6 +5,7 @@ import { createReadStream, existsSync } from 'node:fs';
 import { mkdir, readFile, rename, rm, stat, writeFile } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
 import { installVanilla, offlineUUID, validateNickname, VANILLA_VERSION } from './vanilla.js';
+import { memoryLaunchOptions } from './memory-settings.js';
 import { assertGamePreparationAllowed } from './game-preparation.js';
 
 export const NEOFORGE_VERSION = '21.1.252';
@@ -75,9 +76,11 @@ export async function launchNeoForge(
   directory: string,
   name: string,
   javaPath: string,
-  onSpawn?: (child: ChildProcess) => void
+  onSpawn?: (child: ChildProcess) => void,
+  memoryMb = 6144
 ) {
   return launch({
+    ...memoryLaunchOptions(memoryMb),
     gamePath: directory,
     resourcePath: directory,
     version: NEOFORGE_PROFILE,

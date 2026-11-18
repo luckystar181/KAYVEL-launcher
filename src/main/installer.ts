@@ -3,6 +3,8 @@ import { createReadStream } from 'node:fs';
 import { mkdir, lstat, open, readFile, link, rmdir, statfs, unlink } from 'node:fs/promises';
 import { join } from 'node:path';
 import { Manifest, ManagedFile, validReleaseUrl, verifyManifest } from './manifest.js';
+import { downloadReleaseBytes, readReleaseBody, withReleaseDownload } from './release-download.js';
+import { stageProgress, type ReportProgress } from './preparation-progress.js';
 import { assertOptionalDestinationsFree, hasOptionalModsMarker, inspectOptionalMod, isSwitchable, optionalModsMarker, optionalModsMarkerPath } from './optional-mod-files.js';
 
 async function regularFile(path: string): Promise<boolean> {
@@ -32,6 +34,23 @@ async function safeDirectory(path: string): Promise<void> {
     if (error.code !== 'EEXIST') throw error;
   });
   if (!await existingDirectory(path)) throw new Error('Installation directory disappeared: ' + path);
+}
+
+function managedDirectories(files: ManagedFile[]): string[] {
+  const directories = new Set<string>();
+  for (const file of files) {
+    const parts = file.path.split('/');
+    for (let depth = 1; depth < parts.length; depth++) directories.add(parts.slice(0, depth).join('/'));
+  }
+  return [...directories];
+}
+
+async function verifyParentDirectories(root: string, file: ManagedFile): Promise<void> {
+  for (const directory of managedDirectories([file])) {
+    if (!await existingDirectory(join(root, directory))) {
+      throw new Error('Каталог установленного модпака отсутствует; автоматическое восстановление отключено: ' + directory);
+    }
+  }
 }
 
 const INCOMPLETE_INSTALL = 'install-incomplete.json';
@@ -83,48 +102,10 @@ async function matches(path: string, file: ManagedFile): Promise<boolean> {
   return (await lstat(path)).size === file.size && await hashFile(path) === file.sha256;
 }
 
-async function download(url: string): Promise<Response> {
-  let current = url;
-  for (let i = 0; i < 6; i++) {
-    const parsed = new URL(current);
-    if (parsed.protocol !== 'https:' || !['github.com', 'release-assets.githubusercontent.com'].includes(parsed.hostname) ||
-        parsed.username || parsed.password || parsed.port) throw new Error('Untrusted download redirect');
-    const response = await fetch(current, { redirect: 'manual' });
-    if (![301, 302, 303, 307, 308].includes(response.status)) return response;
-    const next = response.headers.get('location');
-    await response.body?.cancel();
-    if (!next) throw new Error('Download redirect without location');
-    current = new URL(next, current).href;
-  }
-  throw new Error('Too many download redirects');
-}
-
-async function limitedBody(response: Response, limit: number): Promise<Buffer> {
-  if (!response.body) throw new Error('Empty download');
-  const declared = response.headers.get('content-length');
-  if (declared && Number(declared) > limit) throw new Error('Download exceeds size limit');
-  const chunks: Uint8Array[] = [];
-  let size = 0;
-  const reader = response.body.getReader();
-  try {
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      size += value.byteLength;
-      if (size > limit) throw new Error('Download exceeds size limit');
-      chunks.push(value);
-    }
-  } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
-  return Buffer.concat(chunks, size);
-}
-
 async function fetchSignedManifest(url: string, key: string): Promise<{ manifest: Manifest; bytes: Buffer; signature: string }> {
   if (!validReleaseUrl(url) || !url.endsWith('.json')) throw new Error('Untrusted manifest URL');
-  const signatureUrl = url + '.sig';
-  const [manifestResponse, signatureResponse] = await Promise.all([download(url), download(signatureUrl)]);
-  if (manifestResponse.status !== 200 || signatureResponse.status !== 200) throw new Error('Manifest or signature unavailable');
-  const bytes = await limitedBody(manifestResponse, 1_000_000);
-  const signature = (await limitedBody(signatureResponse, 1024)).toString('utf8');
+  const bytes = await downloadReleaseBytes(url, 1_000_000);
+  const signature = (await downloadReleaseBytes(url + '.sig', 1024)).toString('utf8');
   return { manifest: verifyManifest(bytes, signature, key), bytes, signature };
 }
 
@@ -152,13 +133,8 @@ function sameInstalledRelease(previous: Manifest, next: Manifest): boolean {
 async function verifyInstalledFiles(root: string, installed: { manifest: Manifest; bytes: Buffer }): Promise<void> {
   const { manifest, bytes } = installed;
   const canSwitch = await hasOptionalModsMarker(root, bytes);
-  const directories = [...new Set(manifest.files.map(file => file.path.split('/')[0]))];
-  for (const directory of directories) {
-    if (!await existingDirectory(join(root, directory))) {
-      throw new Error('Каталог установленного модпака отсутствует; автоматическое восстановление отключено: ' + directory);
-    }
-  }
   for (const file of manifest.files) {
+    await verifyParentDirectories(root, file);
     if (canSwitch && isSwitchable(file)) await inspectOptionalMod(root, file);
     else if (!await matches(join(root, file.path), file)) {
       throw new Error('Файл установленного модпака изменён или отсутствует; автоматическое восстановление отключено: ' + file.path);
@@ -174,35 +150,26 @@ export async function verifyInstalledRelease(root: string, publicKeyPem: string)
   }
 }
 
-async function fetchFile(file: ManagedFile, part: string): Promise<void> {
-  const response = await download(file.url);
-  if (response.status !== 200) {
-    await response.body?.cancel();
-    throw new Error('Download failed');
-  }
-  if (!response.body) throw new Error('Empty download');
-  let handle;
-  try { handle = await open(part, 'wx', 0o600); }
-  catch (error) { await response.body.cancel().catch(() => {}); throw error; }
+async function fetchFile(file: ManagedFile, part: string, progress: (received: number) => void): Promise<void> {
   let size = 0;
-  try {
-    const reader = response.body.getReader();
+  await withReleaseDownload(file.url, async (response, signal) => {
+    const handle = await open(part, 'wx', 0o600);
+    let received = 0;
     try {
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        size += value.byteLength;
-        if (size > file.size) throw new Error('Download exceeds declared size');
+      size = await readReleaseBody(response, file.size, signal, async value => {
         let written = 0;
         while (written < value.byteLength) {
+          signal.throwIfAborted();
           const result = await handle.write(value, written, value.byteLength - written);
           if (result.bytesWritten === 0) throw new Error('Disk write failed');
           written += result.bytesWritten;
         }
-      }
-    } finally { await reader.cancel().catch(() => {}); reader.releaseLock(); }
-    await handle.sync();
-  } finally { await handle.close(); }
+        received += value.byteLength;
+        progress(received);
+      });
+      await handle.sync();
+    } finally { await handle.close(); }
+  });
   if (size !== file.size || !await matches(part, file)) {
     throw new Error('Downloaded file failed SHA-256 or size check');
   }
@@ -214,59 +181,98 @@ async function createDurableFile(path: string, contents: string): Promise<void> 
   finally { await handle.close(); }
 }
 
-export async function installRelease(root: string, manifestUrl: string, publicKeyPem: string): Promise<string> {
-  const { manifest, bytes, signature } = await fetchSignedManifest(manifestUrl, publicKeyPem);
+export async function withInstallationLock<T>(root: string,
+    action: (install: (manifestUrl: string, publicKeyPem: string, report?: ReportProgress) => Promise<string>) => Promise<T>): Promise<T> {
   const releaseLock = await acquireGameDirectoryLock(root);
+  let active = true;
+  let pending: Promise<string> | undefined;
   try {
-    const meta = join(root, '.kayvel');
-    const directories = [...new Set(manifest.files.map(file => file.path.split('/')[0]))];
-    const previous = await getInstalledManifest(meta, publicKeyPem);
-    if (previous) {
-      if (!sameInstalledRelease(previous.manifest, manifest)) {
-        throw new Error('Автоматическое изменение установленного модпака пока отключено: происхождение старых файлов не подтверждено.');
-      }
-      await verifyInstalledFiles(root, previous);
-      return previous.manifest.buildVersion;
-    }
-
-    await assertOptionalDestinationsFree(root, manifest.files);
-    for (const directory of directories) await safeDirectory(join(root, directory));
-    for (const file of manifest.files) {
-      if (await regularFile(join(root, file.path))) {
-        throw new Error('An unmanaged file already occupies: ' + file.path);
-      }
-    }
-    const stagingRoot = join(meta, 'staging');
-    await safeDirectory(stagingRoot);
-    const disk = await statfs(root);
-    const required = manifest.files.reduce((sum, file) => sum + file.size, 0);
-    const available = disk.bavail * disk.bsize;
-    if (required > available) throw new Error(`Insufficient disk space: required ${required}, available ${available} bytes`);
-    const staging = join(stagingRoot, randomUUID());
-    await mkdir(staging);
-    for (const file of manifest.files) {
-      const part = join(staging, createHash('sha256').update(file.path).digest('hex') + '.part');
-      await fetchFile(file, part);
-    }
-
-    const record = JSON.stringify({ bytes: bytes.toString('base64'), signature });
-    const incomplete = join(meta, INCOMPLETE_INSTALL);
-    await createDurableFile(incomplete, record);
-    for (const file of manifest.files) {
-      const part = join(staging, createHash('sha256').update(file.path).digest('hex') + '.part');
-      const info = await lstat(part);
-      if (!info.isFile() || info.nlink !== 1 || !await matches(part, file)) throw new Error('Staged file changed before installation');
-      const target = join(root, file.path);
-      await link(part, target);
-      if (!await matches(target, file)) throw new Error('Installed file changed during installation');
-      await unlink(part);
-    }
-    await rmdir(staging);
-    await createDurableFile(join(meta, 'signed-manifest.json'), record);
-    if (manifest.files.some(isSwitchable)) await createDurableFile(optionalModsMarkerPath(root), optionalModsMarker(bytes));
-    await unlink(incomplete);
-    return manifest.buildVersion;
+    const result = await action((url, key, report = () => {}) => {
+      if (!active) throw new Error('Блокировка установки уже освобождена.');
+      if (pending) throw new Error('В этой блокировке установка сборки уже начата.');
+      pending = Promise.resolve().then(async () => {
+        stageProgress(report, 'modpack', 'Проверка подписи сборки');
+        const signed = await fetchSignedManifest(url, key);
+        return installVerifiedRelease(root, signed, key, report);
+      });
+      void pending.catch(() => {});
+      return pending;
+    });
+    active = false;
+    if (pending) await pending;
+    return result;
   } finally {
-    await releaseLock();
+    active = false;
+    try { if (pending) await Promise.allSettled([pending]); }
+    finally { await releaseLock(); }
   }
+}
+
+export async function installRelease(root: string, manifestUrl: string, publicKeyPem: string, report: ReportProgress = () => {}): Promise<string> {
+  stageProgress(report, 'modpack', 'Проверка подписи сборки');
+  const signed = await fetchSignedManifest(manifestUrl, publicKeyPem);
+  return withInstallationLock(root, async () => installVerifiedRelease(root, signed, publicKeyPem, report));
+}
+
+async function installVerifiedRelease(root: string, signed: Awaited<ReturnType<typeof fetchSignedManifest>>, publicKeyPem: string, report: ReportProgress): Promise<string> {
+  const { manifest, bytes, signature } = signed;
+  const meta = join(root, '.kayvel');
+  const directories = managedDirectories(manifest.files);
+  const previous = await getInstalledManifest(meta, publicKeyPem);
+  if (previous) {
+    if (!sameInstalledRelease(previous.manifest, manifest)) {
+      throw new Error('Автоматическое изменение установленного модпака пока отключено: происхождение старых файлов не подтверждено.');
+    }
+    await verifyInstalledFiles(root, previous);
+    return previous.manifest.buildVersion;
+  }
+
+  await assertOptionalDestinationsFree(root, manifest.files);
+  for (const directory of directories) await safeDirectory(join(root, directory));
+  for (const file of manifest.files) {
+    if (await regularFile(join(root, file.path))) {
+      throw new Error('An unmanaged file already occupies: ' + file.path);
+    }
+  }
+  const stagingRoot = join(meta, 'staging');
+  await safeDirectory(stagingRoot);
+  const disk = await statfs(root);
+  const required = manifest.files.reduce((sum, file) => sum + file.size, 0);
+  const available = disk.bavail * disk.bsize;
+  if (required > available) throw new Error(`Insufficient disk space: required ${required}, available ${available} bytes`);
+  const staging = join(stagingRoot, randomUUID());
+  await mkdir(staging);
+  let received = 0;
+  let completedFiles = 0;
+  for (const file of manifest.files) {
+    const part = join(staging, createHash('sha256').update(file.path).digest('hex') + '.part');
+    const base = received;
+    await fetchFile(file, part, current => {
+      received = base + current;
+      report({ stage: 'modpack', file: file.path, received, total: required, completedFiles, totalFiles: manifest.files.length });
+    });
+    completedFiles++;
+    report({ stage: 'modpack', file: file.path, received, total: required, completedFiles, totalFiles: manifest.files.length });
+  }
+  stageProgress(report, 'modpack', 'Размещение проверенных файлов сборки');
+
+  const record = JSON.stringify({ bytes: bytes.toString('base64'), signature });
+  const incomplete = join(meta, INCOMPLETE_INSTALL);
+  await createDurableFile(incomplete, record);
+  for (const file of manifest.files) {
+    const part = join(staging, createHash('sha256').update(file.path).digest('hex') + '.part');
+    const info = await lstat(part);
+    if (!info.isFile() || info.nlink !== 1 || !await matches(part, file)) throw new Error('Staged file changed before installation');
+    await verifyParentDirectories(root, file);
+    const target = join(root, file.path);
+    await link(part, target);
+    await verifyParentDirectories(root, file);
+    if (!await matches(target, file)) throw new Error('Installed file changed during installation');
+    await unlink(part);
+  }
+  await rmdir(staging);
+  await createDurableFile(join(meta, 'signed-manifest.json'), record);
+  if (manifest.files.some(isSwitchable)) await createDurableFile(optionalModsMarkerPath(root), optionalModsMarker(bytes));
+  await unlink(incomplete);
+  return manifest.buildVersion;
 }

@@ -7,7 +7,7 @@ import { join } from 'node:path';
 import { createMinecraftDownloadAgent, downloadVerified, installVanilla } from '../dist/main/vanilla.js';
 import { installNeoForge } from '../dist/main/neoforge.js';
 import { gamePreparationUnavailable, PREPARATION_BLOCKED_MESSAGE } from '../dist/main/game-preparation.js';
-import { confirmNetworkIsolation, requireAvailableJava21 } from '../dist/main/game-launch-policy.js';
+import { requireAvailableJava21 } from '../dist/main/game-launch-policy.js';
 
 const payload = Buffer.from('fictional Minecraft data');
 const hash = bytes => createHash('sha1').update(bytes).digest('hex');
@@ -33,22 +33,9 @@ test('preparation entry points refuse before creating files, fetching, or starti
   assert.deepEqual(await readdir(root), []);
 }));
 
-test('network isolation requires a fresh explicit affirmative response each time', async () => {
-  const answers = [0, 1, -1, 1];
-  const prompts = [];
-  const show = async options => { prompts.push(options); return { response: answers.shift() }; };
-  assert.equal(await confirmNetworkIsolation(show, 'ru'), false);
-  assert.equal(await confirmNetworkIsolation(show, 'ru'), true);
-  assert.equal(await confirmNetworkIsolation(show, 'en'), false);
-  assert.equal(await confirmNetworkIsolation(show, 'en'), true);
-  assert.equal(prompts.length, 4);
-  for (const prompt of prompts) {
-    assert.equal(prompt.defaultId, 0);
-    assert.equal(prompt.cancelId, 0);
-    assert.equal(prompt.buttons.length, 2);
-  }
-  assert.match(prompts[0].detail, /не проверяет/);
-  assert.match(prompts[2].detail, /does not verify/);
+test('launch entry points do not show a network-isolation confirmation', async () => {
+  const source = await readFile(new URL('../dist/main/main.js', import.meta.url), 'utf8');
+  assert.doesNotMatch(source, /confirmNetworkIsolation|confirmLaunchIsolation|showMessageBox/);
 });
 
 test('launch requires already available Java and does not request installation', () => {

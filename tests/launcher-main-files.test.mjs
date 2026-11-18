@@ -62,6 +62,6 @@ test('portable main copy never replaces an existing output file', async () => fi
 
 test('the current launcher main dependency graph contains no account or ticket prototype', async () => {
   const files = await launcherMainFiles(fileURLToPath(new URL('../dist/main/', import.meta.url)));
-  for (const required of ['main.js', 'preload.cjs', 'local-profile.js', 'minecraft-skin.js', 'manifest.js']) assert.ok(files.includes(required), required);
+  for (const required of ['main.js', 'preload.cjs', 'local-profile.js', 'manifest.js', 'installer.js', 'release-download.js']) assert.ok(files.includes(required), required);
   for (const historical of ['auth.js', 'game-bridge-session.js', 'ticket-bridge.js']) assert.ok(!files.includes(historical), historical);
 });

@@ -1,13 +1,13 @@
 import { constants, createReadStream } from 'node:fs';
 import { copyFile, lstat, mkdir, readFile, readdir, realpath, stat, statfs, writeFile } from 'node:fs/promises';
 import { createHash, createPrivateKey, createPublicKey, sign } from 'node:crypto';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { basename, dirname, extname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { verifyManifest } from '../dist/main/manifest.js';
+import { validManagedPath, verifyManifest } from '../dist/main/manifest.js';
 import { sameKnownFile } from '../dist/main/file-identity.js';
 
 const projectRoot = await realpath(fileURLToPath(new URL('../', import.meta.url)));
-const restrictedNames = new Set(['ragdoll_corpse-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar']);
+const restrictedNames = new Set(['ragdoll_corpse-1.21.1-0.3.0.jar', 'sable_player_ragdoll-1.21.1-0.7.5.jar', 'sable_player_ragdoll-1.21.1-0.8.1.jar']);
 const usage = 'Usage: node scripts/prepare-github-release.mjs --source FOLDER --repo OWNER/REPO --tag TAG --private-key FILE --output NEW_FOLDER --confirm-rights [--confirm-ragdoll-permissions]';
 
 function inside(parent, path) {
@@ -37,25 +37,34 @@ async function plainDirectory(path) {
 async function inputFiles(source, confirmRagdollPermissions) {
   await plainDirectory(source);
   const entries = await readdir(source);
-  if (entries.some(name => !['mods', 'resourcepacks'].includes(name))) {
-    throw new Error('Source may contain only mods and resourcepacks directories. Select approved files in a separate folder.');
+  if (entries.some(name => !['mods', 'resourcepacks', 'kubejs'].includes(name))) {
+    throw new Error('Source may contain only mods, resourcepacks and approved kubejs directories. Select approved files in a separate folder.');
   }
+  const kubejsDirectories = new Set([
+    'kubejs', 'kubejs/client_scripts', 'kubejs/startup_scripts', 'kubejs/config',
+    'kubejs/assets', 'kubejs/assets/kubejs', 'kubejs/assets/kubejs/textures',
+    'kubejs/assets/kubejs/textures/block', 'kubejs/assets/kubejs/textures/item'
+  ]);
   const files = [];
   const paths = new Set();
   let total = 0;
-  for (const directory of ['mods', 'resourcepacks']) {
-    if (!entries.includes(directory)) continue;
+  async function visit(directory) {
     const folder = join(source, directory);
     await plainDirectory(folder);
     for (const name of (await readdir(folder)).sort()) {
+      const path = `${directory}/${name}`;
       const sourcePath = join(folder, name);
       const info = await lstat(sourcePath, { bigint: true });
+      if (info.isDirectory() && !info.isSymbolicLink() && kubejsDirectories.has(path)) {
+        await visit(path);
+        continue;
+      }
       if (!info.isFile() || info.isSymbolicLink()) throw new Error('Expected a regular file, not a link or directory: ' + sourcePath);
+      if (!validManagedPath(path)) throw new Error('Unsupported managed path: ' + path);
       if (!sameKnownFile(info, info)) throw new Error('Cannot verify the identity of source file: ' + sourcePath);
       if (restrictedNames.has(name.toLowerCase()) && !confirmRagdollPermissions) throw new Error('This file has a recorded no-redistribution restriction. Include it only with the rights holder’s permission and --confirm-ragdoll-permissions: ' + name);
       if (info.size < 1n || info.size > 1_000_000_000n) throw new Error('File size is outside installer limits: ' + name);
       const size = Number(info.size);
-      const path = `${directory}/${name}`;
       const key = path.toLowerCase();
       if (paths.has(key)) throw new Error('Duplicate case-insensitive game path: ' + path);
       paths.add(key);
@@ -63,6 +72,9 @@ async function inputFiles(source, confirmRagdollPermissions) {
       if (total > 2_000_000_000) throw new Error('Source exceeds the 2 GB installer limit');
       files.push({ path, sourcePath, size, mtimeNs: info.mtimeNs, dev: info.dev, ino: info.ino });
     }
+  }
+  for (const directory of ['mods', 'resourcepacks', 'kubejs']) {
+    if (entries.includes(directory)) await visit(directory);
   }
   if (files.length === 0 || files.length > 998) throw new Error('Select 1 to 998 files; GitHub permits at most 1000 assets per release, including the manifest and signature.');
   return { files, total };
@@ -103,7 +115,7 @@ export async function prepareGithubRelease({ source, repo, tag, privateKeyPath, 
   const baseUrl = manifestUrl.slice(0, -'manifest.json'.length);
   const preview = files.map((file, index) => ({
     path: file.path, size: file.size, sha256: '0'.repeat(64),
-    url: `${baseUrl}kayvel-${String(index + 1).padStart(4, '0')}${file.path.startsWith('mods/') ? '.jar' : '.zip'}`
+    url: `${baseUrl}kayvel-${String(index + 1).padStart(4, '0')}${extname(file.path)}`
   }));
   const previewBytes = Buffer.from(JSON.stringify({ schemaVersion: 1, buildVersion: tag, minecraftVersion: '1.21.1', neoforgeVersion: '21.1.252', files: preview }));
   verifyManifest(previewBytes, sign(null, previewBytes, privateKey).toString('base64'), publicPem);
@@ -124,7 +136,7 @@ export async function prepareGithubRelease({ source, repo, tag, privateKeyPath, 
   const manifestFiles = [];
   for (let index = 0; index < files.length; index++) {
     const file = files[index];
-    const name = `kayvel-${String(index + 1).padStart(4, '0')}${file.path.startsWith('mods/') ? '.jar' : '.zip'}`;
+    const name = `kayvel-${String(index + 1).padStart(4, '0')}${extname(file.path)}`;
     const destination = join(assets, name);
     await copyFile(file.sourcePath, destination, constants.COPYFILE_EXCL);
     const [sourceAfter, copied] = await Promise.all([lstat(file.sourcePath, { bigint: true }), stat(destination)]);

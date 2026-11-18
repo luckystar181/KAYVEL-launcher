@@ -1,20 +1,20 @@
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, session, screen } from 'electron';
-import { existsSync } from 'node:fs';
+import { app, BrowserWindow, ipcMain, nativeImage, session, screen, shell } from 'electron';
+import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireGameDirectoryLock, installRelease, verifyInstalledRelease } from './installer.js';
+import { acquireGameDirectoryLock } from './installer.js';
 import { readModSwitches, setModEnabled } from './mod-switches.js';
 import { createGameExitReporter, watchLockedGame } from './game-process.js';
 import { MANIFEST_PUBLIC_KEY_PEM, RELEASE_MANIFEST_URL } from './release.js';
-import { availableJava21 } from './java-runtime.js';
 import { launchVanilla, validateNickname, VANILLA_VERSION } from './vanilla.js';
 import { launchNeoForge, neoForgeReady, NEOFORGE_VERSION } from './neoforge.js';
-import { confirmNetworkIsolation, requireAvailableJava21 } from './game-launch-policy.js';
+import { requireAvailableJava21 } from './game-launch-policy.js';
+import { createMemorySettingsStore } from './memory-settings.js';
 import { gamePreparationUnavailable } from './game-preparation.js';
-import { lookupMinecraftSkin } from './minecraft-skin.js';
 import { createLocalProfileStore } from './local-profile.js';
 import { createGameBestStore } from './game-best.js';
-import { createNewsStore } from './news.js';
+import { instancePath, prepareInstance, preparedJava, verifyPreparation } from './prepare-instance.js';
+import { stageProgress, type PreparationProgress } from './preparation-progress.js';
 
 let window: BrowserWindow | null = null;
 let installing = false;
@@ -29,18 +29,31 @@ const localProfile = createLocalProfileStore(app.getPath('userData'), bytes => {
   const size = image.getSize();
   return !image.isEmpty() && size.width === 64 && (size.height === 32 || size.height === 64);
 });
-const localProfileReleaseReady = false;
+const memorySettings = createMemorySettingsStore(app.getPath('userData'));
+const localProfileReleaseReady = true;
 const gameBest = createGameBestStore(app.getPath('userData'));
-const news = createNewsStore(app.getPath('userData'));
 const trusted = (event: Electron.IpcMainInvokeEvent) => Boolean(window && event.sender === window.webContents);
 const vanillaPath = () => join(app.getPath('userData'), 'vanilla');
 const vanillaReady = () => existsSync(join(vanillaPath(), '.kayvel-vanilla-ready')) && existsSync(join(vanillaPath(), 'versions', VANILLA_VERSION, `${VANILLA_VERSION}.jar`));
-const neoforgePath = () => join(app.getPath('userData'), 'game');
+const neoforgePath = () => instancePath(app.getPath('userData'));
+const preparedInstanceReady = () => neoForgeReady(neoforgePath())
+  && existsSync(join(neoforgePath(), '.preparation', 'ready.json'))
+  && !existsSync(join(neoforgePath(), '.preparation', 'incomplete.json'));
+let preparationProgress: PreparationProgress | null = null;
+let lastProgressSent = 0;
+function reportPreparation(progress: PreparationProgress): void {
+  const previous = preparationProgress;
+  preparationProgress = progress;
+  const completed = progress.total !== null && progress.received === progress.total || progress.totalFiles !== null && progress.completedFiles === progress.totalFiles;
+  if (previous?.stage === progress.stage && !completed && Date.now() - lastProgressSent < 100) return;
+  lastProgressSent = Date.now();
+  if (window && !window.isDestroyed()) window.webContents.send('kayvel:preparation-progress', progress);
+}
 
-async function confirmLaunchIsolation(language: unknown): Promise<boolean> {
-  if (!window || window.isDestroyed()) return false;
-  const owner = window;
-  return await confirmNetworkIsolation(options => dialog.showMessageBox(owner, options), language);
+function clearPreparation(): void {
+  preparationProgress = null;
+  lastProgressSent = 0;
+  if (window && !window.isDestroyed()) window.webContents.send('kayvel:preparation-progress', null);
 }
 
 app.whenReady().then(async () => {
@@ -82,20 +95,45 @@ ipcMain.handle('kayvel:status', (event) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
   return {
   releaseConfigured: Boolean(localProfileReleaseReady && RELEASE_MANIFEST_URL && MANIFEST_PUBLIC_KEY_PEM),
-  gamePath: join(app.getPath('userData'), 'game'),
+  gamePath: neoforgePath(),
   vanillaPath: vanillaPath(),
   vanillaReady: vanillaReady(),
   preparingVanilla,
   neoforgePath: neoforgePath(),
-  neoforgeReady: neoForgeReady(neoforgePath()),
+  neoforgeReady: preparedInstanceReady(),
   preparingNeoForge,
   neoforgeVersion: NEOFORGE_VERSION,
   activeGamePath,
   gameRunning,
-  javaFound: Boolean(availableJava21(app.getPath('userData'))),
   installing,
-  modSwitching
+  modSwitching,
+  preparationProgress
 };
+});
+
+ipcMain.handle('kayvel:open-game-folder', async (event, language: unknown) => {
+  if (!trusted(event)) throw new Error('Untrusted renderer');
+  const missing = language === 'en' ? 'The game folder has not been created yet. Download the modpack first.' : 'Папка игры ещё не создана. Сначала скачайте сборку.';
+  const failed = language === 'en' ? 'Could not open the game folder in Explorer.' : 'Не удалось открыть папку игры в Проводнике.';
+  const path = neoforgePath();
+  try {
+    const info = lstatSync(path);
+    if (!info.isDirectory() || info.isSymbolicLink()) return { ok: false, message: failed };
+    const error = await shell.openPath(path);
+    return { ok: !error, message: error ? failed : '' };
+  } catch (error) {
+    return { ok: false, message: (error as NodeJS.ErrnoException).code === 'ENOENT' ? missing : failed };
+  }
+});
+
+ipcMain.handle('kayvel:memory-settings', (event) => {
+  if (!trusted(event)) throw new Error('Untrusted renderer');
+  return memorySettings.read();
+});
+ipcMain.handle('kayvel:memory-save', (event, memoryMb: unknown) => {
+  if (!trusted(event)) throw new Error('Untrusted renderer');
+  if (modSwitching || installing || preparingVanilla || preparingNeoForge || gameRunning) throw new Error('Измените объём ОЗУ после завершения подготовки или игры.');
+  return memorySettings.save(memoryMb);
 });
 
 ipcMain.handle('kayvel:game-best', (event) => {
@@ -105,11 +143,6 @@ ipcMain.handle('kayvel:game-best', (event) => {
 ipcMain.handle('kayvel:game-best-save', (event, score: unknown) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
   return gameBest.save(score);
-});
-
-ipcMain.handle('kayvel:news', (event) => {
-  if (!trusted(event)) throw new Error('Untrusted renderer');
-  return news.read();
 });
 
 ipcMain.handle('kayvel:local-profile', (event) => {
@@ -124,8 +157,6 @@ ipcMain.handle('kayvel:local-skin-save', (event, bytes: unknown, model: unknown)
   if (!trusted(event)) throw new Error('Untrusted renderer');
   return localProfile.saveSkin(bytes, model);
 });
-
-ipcMain.handle('kayvel:skin-by-nickname', (event, nickname: unknown) => trusted(event) ? lookupMinecraftSkin(nickname) : { ok: false, message: 'Недоступно.' });
 
 ipcMain.handle('kayvel:mod-switches', async (event) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
@@ -143,61 +174,68 @@ ipcMain.handle('kayvel:mod-switch-set', async (event, id: unknown, enabled: unkn
   } finally { modSwitching = false; }
 });
 
-ipcMain.handle('kayvel:install', async (event) => {
-  if (!trusted(event)) return { ok: false, message: 'Недоступно.' };
-  if (!localProfileReleaseReady || !RELEASE_MANIFEST_URL || !MANIFEST_PUBLIC_KEY_PEM) return { ok: false, message: 'Нужен новый подписанный релиз без KAYVEL Core; старый тестовый модпак не устанавливается.' };
-  if (modSwitching || installing || preparingNeoForge || gameRunning) return { ok: false, message: 'Установка или игра уже выполняется.' };
-  installing = true;
-  try {
-    const version = await installRelease(join(app.getPath('userData'), 'game'), RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM);
-    return { ok: true, message: `Файлы модпака версии ${version} проверены. NeoForge устанавливается отдельно; ресурс-паки включаются в игре.` };
-  } catch (error) {
-    return { ok: false, message: error instanceof Error ? error.message : 'Ошибка установки файлов.' };
-  } finally {
-    installing = false;
-  }
-});
+ipcMain.handle('kayvel:install', (event) => trusted(event) ? gamePreparationUnavailable() : { ok: false, message: 'Недоступно.' });
 
 ipcMain.handle('kayvel:install-vanilla', (event) => trusted(event) ? gamePreparationUnavailable() : { ok: false, message: 'Недоступно.' });
 ipcMain.handle('kayvel:install-neoforge', (event) => trusted(event) ? gamePreparationUnavailable() : { ok: false, message: 'Недоступно.' });
 
-ipcMain.handle('kayvel:play-neoforge', async (event, language: unknown) => {
+ipcMain.handle('kayvel:play-neoforge', (event, language: unknown) => trusted(event) ? playPreparedNeoForge(language) : { ok: false, message: 'Недоступно.' });
+
+ipcMain.handle('kayvel:download-and-play', async (event, language: unknown) => {
   if (!trusted(event)) return { ok: false, message: 'Недоступно.' };
+  if (!localProfileReleaseReady || !RELEASE_MANIFEST_URL || !MANIFEST_PUBLIC_KEY_PEM) return { ok: false, message: 'Новый подписанный выпуск сборки ещё не настроен.' };
   if (modSwitching || preparingNeoForge || preparingVanilla || installing || gameRunning) return { ok: false, message: 'Подготовка или игра уже выполняется.' };
-  if (!neoForgeReady(neoforgePath())) return { ok: false, message: 'NeoForge не готов к запуску. Его подготовка временно отключена.' };
+  preparingNeoForge = true;
+  try {
+    validateNickname(localProfile.read().nickname);
+    memorySettings.read();
+    await prepareInstance(app.getPath('userData'), RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM, reportPreparation);
+    preparingNeoForge = false;
+    return await playPreparedNeoForge(language);
+  } catch (error) {
+    stageProgress(reportPreparation, 'error', 'Операция остановлена; файлы сохранены для проверки.');
+    return { ok: false, message: error instanceof Error ? error.message : 'Не удалось подготовить игру.' };
+  } finally { preparingNeoForge = false; }
+});
+
+async function playPreparedNeoForge(language: unknown) {
+  if (modSwitching || preparingNeoForge || preparingVanilla || installing || gameRunning) return { ok: false, message: 'Подготовка или игра уже выполняется.' };
+  if (!localProfileReleaseReady || !RELEASE_MANIFEST_URL || !MANIFEST_PUBLIC_KEY_PEM) return { ok: false, message: 'Новый подписанный выпуск сборки ещё не настроен.' };
+  if (!preparedInstanceReady()) return { ok: false, message: 'Экземпляр не подготовлен. Используйте «Скачать и играть».' };
   let releaseGameLock: (() => Promise<void>) | undefined;
   let gameObserved = false;
   preparingNeoForge = true;
   try {
     const name = validateNickname(localProfile.read().nickname);
-    if (!await confirmLaunchIsolation(language)) {
-      preparingNeoForge = false;
-      return { ok: false, message: 'Запуск отменён: сетевая изоляция не подтверждена.' };
-    }
+    const memoryMb = memorySettings.read().memoryMb;
     const gamePath = neoforgePath();
     releaseGameLock = await acquireGameDirectoryLock(gamePath);
-    await verifyInstalledRelease(gamePath, MANIFEST_PUBLIC_KEY_PEM);
-    const java = requireAvailableJava21(app.getPath('userData'));
+    await verifyPreparation(gamePath, MANIFEST_PUBLIC_KEY_PEM, reportPreparation);
+    const java = preparedJava(gamePath, app.getPath('userData'));
+    stageProgress(reportPreparation, 'launch', 'Запуск Minecraft');
     gameRunning = true;
     preparingNeoForge = false;
     activeGamePath = gamePath;
     await launchNeoForge(gamePath, name, java, child => {
       const release = releaseGameLock!;
       gameObserved = true;
+      clearPreparation();
       const reportExit = createGameExitReporter(gamePath, exit => {
         gameRunning = false;
         activeGamePath = null;
+        clearPreparation();
         if (window && !window.isDestroyed()) window.webContents.send('kayvel:game-exit', exit);
       });
       watchLockedGame(child, release, reportExit, error => console.error('Ошибка процесса игры или блокировки:', error));
       releaseGameLock = undefined;
-    });
+    }, memoryMb);
     if (!gameObserved) {
       gameObserved = true;
       throw new Error('Не удалось подтвердить наблюдение за процессом игры; блокировка сохранена до проверки.');
     }
-    return { ok: true, message: `NeoForge запущен с локальным ником ${name}. Старый Core не удалён; для него билет больше не выдаётся.` };
+    return { ok: true, message: `NeoForge запущен с локальным ником ${name}. Допуск на сервер проверяется сервером.` };
   } catch (error) {
+    stageProgress(reportPreparation, 'error', 'Запуск остановлен. Файлы сохранены для проверки.');
     if (!gameObserved) {
       if (releaseGameLock) await releaseGameLock().catch(lockError => console.error('Не удалось снять блокировку игры:', lockError));
       preparingNeoForge = false;
@@ -206,7 +244,7 @@ ipcMain.handle('kayvel:play-neoforge', async (event, language: unknown) => {
     }
     return { ok: false, message: error instanceof Error ? error.message : 'Не удалось запустить NeoForge.' };
   }
-});
+}
 
 ipcMain.handle('kayvel:play-vanilla', async (event, language: unknown) => {
   if (!trusted(event)) return { ok: false, message: 'Недоступно.' };
@@ -215,19 +253,17 @@ ipcMain.handle('kayvel:play-vanilla', async (event, language: unknown) => {
   preparingVanilla = true;
   try {
     const name = validateNickname(localProfile.read().nickname);
-    if (!await confirmLaunchIsolation(language)) {
-      preparingVanilla = false;
-      return { ok: false, message: 'Запуск отменён: сетевая изоляция не подтверждена.' };
-    }
+    const memoryMb = memorySettings.read().memoryMb;
     const gamePath = vanillaPath();
     const java = requireAvailableJava21(app.getPath('userData'));
     preparingVanilla = false;
     gameRunning = true;
     activeGamePath = gamePath;
-    const child = await launchVanilla(gamePath, name, java);
+    const child = await launchVanilla(gamePath, name, java, memoryMb);
     const reportExit = createGameExitReporter(gamePath, exit => {
       gameRunning = false;
       activeGamePath = null;
+      clearPreparation();
       if (window && !window.isDestroyed()) window.webContents.send('kayvel:game-exit', exit);
     });
     child.once('exit', code => reportExit(code));

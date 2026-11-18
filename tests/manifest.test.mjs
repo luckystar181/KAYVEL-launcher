@@ -375,6 +375,77 @@ test('a target appearing during installation is not overwritten and the incomple
   } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
 });
 
+test('failed manifest transport stops before signature, assets or local changes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kayvel-test-'));
+  const root = join(directory, 'game');
+  const originalFetch = globalThis.fetch;
+  const attempts = [];
+  globalThis.fetch = async request => {
+    attempts.push(request);
+    return new Response('fictional error', { status: 503 });
+  };
+  try {
+    await assert.rejects(installRelease(root, manifestUrl, publicPem), /HTTP status 503/);
+    assert.deepEqual(attempts, [manifestUrl]);
+    assert.deepEqual(await readdir(directory), []);
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
+});
+
+test('failed signature transport stops before assets or local changes', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kayvel-test-'));
+  const root = join(directory, 'game');
+  const release = signed();
+  const originalFetch = globalThis.fetch;
+  const attempts = [];
+  globalThis.fetch = async request => {
+    attempts.push(request);
+    if (request === manifestUrl) return new Response(release.bytes);
+    return new Response('fictional error', { status: 429 });
+  };
+  try {
+    await mkdir(root);
+    await writeFile(join(root, 'options.txt'), 'personal settings');
+    await assert.rejects(installRelease(root, manifestUrl, publicPem), /HTTP status 429/);
+    assert.deepEqual(attempts, [manifestUrl, manifestUrl + '.sig']);
+    assert.deepEqual(await readdir(root), ['options.txt']);
+    assert.equal(await readFile(join(root, 'options.txt'), 'utf8'), 'personal settings');
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
+});
+
+test('a blocked asset redirect preserves unrelated files and leaves no installed release', async () => {
+  const directory = await mkdtemp(join(tmpdir(), 'kayvel-test-'));
+  const root = join(directory, 'game');
+  const release = signed();
+  const originalFetch = globalThis.fetch;
+  const attempts = [];
+  let cancelled = false;
+  globalThis.fetch = async request => {
+    attempts.push(request);
+    if (request === manifestUrl) return new Response(release.bytes);
+    if (request === manifestUrl + '.sig') return new Response(release.signature);
+    if (request === url) return new Response(new ReadableStream({ cancel() { cancelled = true; } }), {
+      status: 302, headers: { location: 'https://assets.example.invalid/file.jar' }
+    });
+    throw new Error('Unexpected request');
+  };
+  try {
+    await mkdir(join(root, 'mods'), { recursive: true });
+    await mkdir(join(root, 'saves', 'world'), { recursive: true });
+    await writeFile(join(root, 'mods', 'personal.jar'), 'personal mod');
+    await writeFile(join(root, 'saves', 'world', 'level.dat'), 'personal world');
+    await assert.rejects(installRelease(root, manifestUrl, publicPem), /Untrusted/);
+    assert.deepEqual(attempts, [manifestUrl, manifestUrl + '.sig', url]);
+    assert.equal(cancelled, true);
+    assert.deepEqual(await readdir(join(root, 'mods')), ['personal.jar']);
+    assert.equal(await readFile(join(root, 'mods', 'personal.jar'), 'utf8'), 'personal mod');
+    assert.equal(await readFile(join(root, 'saves', 'world', 'level.dat'), 'utf8'), 'personal world');
+    await assert.rejects(readFile(join(root, '.kayvel', 'signed-manifest.json')), { code: 'ENOENT' });
+    const staging = join(root, '.kayvel', 'staging');
+    const [attempt] = await readdir(staging);
+    assert.deepEqual(await readdir(join(staging, attempt)), []);
+  } finally { globalThis.fetch = originalFetch; await rm(directory, { recursive: true, force: true }); }
+});
+
 test('an incomplete marker of any type blocks acquisition without being removed', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'kayvel-test-'));
   const root = join(directory, 'game');

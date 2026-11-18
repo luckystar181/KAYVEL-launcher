@@ -5,16 +5,31 @@ import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { runInNewContext } from 'node:vm';
 import ts from 'typescript';
+import { memoryLaunchOptions } from '../dist/main/memory-settings.js';
+import { stageProgress } from '../dist/main/preparation-progress.js';
+import { EventEmitter } from 'node:events';
+import { createGameExitReporter, watchLockedGame } from '../dist/main/game-process.js';
+import { MANIFEST_PUBLIC_KEY_PEM, RELEASE_MANIFEST_URL } from '../dist/main/release.js';
+import { createPublicKey } from 'node:crypto';
 
-async function isolatedMain() {
+test('published local-profile release is configured without the historical Core release', async () => {
+  assert.equal(RELEASE_MANIFEST_URL, 'https://github.com/luckystar181/KAYVEL-mods/releases/download/v0.2.0-v3S/manifest.json');
+  assert.equal(createPublicKey(MANIFEST_PUBLIC_KEY_PEM).asymmetricKeyType, 'ed25519');
+  const source = await readFile(new URL('../dist/main/main.js', import.meta.url), 'utf8');
+  assert.ok(source.includes('const localProfileReleaseReady = true;'));
+});
+
+async function isolatedMain({ activateRelease = false, nickname = '', overrides = {}, confirm, openPath = async () => '' } = {}) {
   const handlers = new Map();
-  const sender = { setWindowOpenHandler() {}, on() {} };
+  const sent = [];
+  const sender = { setWindowOpenHandler() {}, on() {}, send: (...args) => sent.push(args) };
   const event = { sender };
-  const profile = { nickname: '', skin: null };
+  const profile = { nickname, skin: null };
   const root = join('fictional-profile', 'launcher');
   let ready;
   const modules = {
     electron: {
+      shell: { openPath },
       app: { getPath: () => root, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
       BrowserWindow: class {
         webContents = sender;
@@ -22,7 +37,7 @@ async function isolatedMain() {
         async loadFile() {}
         isDestroyed() { return false; }
       },
-      dialog: { showMessageBox() { throw new Error('No game launch was authorized'); } },
+      dialog: { showMessageBox: confirm ?? (() => { throw new Error('No game launch was authorized'); }) },
       nativeImage: {},
       ipcMain: { handle: (channel, handler) => handlers.set(channel, handler), on() {} },
       session: { defaultSession: { setPermissionRequestHandler() {}, webRequest: { onHeadersReceived() {} } } },
@@ -34,13 +49,17 @@ async function isolatedMain() {
     './installer.js': {},
     './mod-switches.js': {},
     './game-process.js': {},
-    './release.js': { MANIFEST_PUBLIC_KEY_PEM: 'fictional-public-key', RELEASE_MANIFEST_URL: '' },
-    './java-runtime.js': { availableJava21: () => null },
-    './vanilla.js': { VANILLA_VERSION: '1.21.1' },
+    './release.js': { MANIFEST_PUBLIC_KEY_PEM: 'fictional-public-key', RELEASE_MANIFEST_URL: activateRelease ? 'https://github.com/example/kayvel/releases/download/fixture/manifest.json' : '' },
+    './java-runtime.js': { availableJava21: () => assert.fail('Status polling must not execute Java probes') },
+    './vanilla.js': { VANILLA_VERSION: '1.21.1', validateNickname: value => { if (!/^[A-Za-z0-9_]{3,16}$/.test(value)) throw new Error('Invalid fixture nickname'); return value; } },
     './neoforge.js': { NEOFORGE_VERSION: '21.1.252', neoForgeReady: () => false },
     './game-launch-policy.js': {},
+    './memory-settings.js': { createMemorySettingsStore: () => {
+      let memoryMb = 6144;
+      const read = () => ({ memoryMb, minMemoryMb: 2048, maxMemoryMb: 14336, totalMemoryMb: 16384 });
+      return { read, save: value => { memoryMb = memoryLaunchOptions(value).maxMemory; return read(); } };
+    } },
     './game-preparation.js': { gamePreparationUnavailable: () => ({ ok: false, message: 'Preparation disabled' }) },
-    './minecraft-skin.js': {},
     './local-profile.js': { createLocalProfileStore: path => {
       assert.equal(path, root);
       return {
@@ -50,35 +69,83 @@ async function isolatedMain() {
       };
     } },
     './game-best.js': { createGameBestStore: () => ({ read: () => 0, save: score => score }) },
-    './news.js': { createNewsStore: () => ({ read: () => [] }) }
+    './prepare-instance.js': { instancePath: path => join(path, 'instances', 'kayvel-1.21.1-neoforge-21.1.252-v3S') },
+    './preparation-progress.js': { stageProgress },
+    ...overrides
   };
   const url = new URL('../dist/main/main.js', import.meta.url);
-  const source = (await readFile(url, 'utf8')).replace('import.meta.url', JSON.stringify(url.href));
+  let source = (await readFile(url, 'utf8')).replace('import.meta.url', JSON.stringify(url.href));
+  assert.match(source, /const localProfileReleaseReady = (?:true|false);/);
+  source = source.replace(/const localProfileReleaseReady = (?:true|false);/, `const localProfileReleaseReady = ${activateRelease};`);
   const { outputText } = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS } });
   runInNewContext(outputText, {
     exports: {},
     URL,
+    Error,
     require(name) {
       assert.ok(Object.hasOwn(modules, name), `Unexpected main dependency: ${name}`);
       return modules[name];
     }
   });
   await ready();
-  return { handlers, event, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) };
+  return { handlers, event, sent, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) };
 }
 
 test('main registers local-profile operations but no KAYVEL account or remote skin operations', async () => {
   const main = await isolatedMain();
   assert.deepEqual([...main.handlers.keys()].sort(), [
-    'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
-    'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:mod-switch-set',
-    'kayvel:mod-switches', 'kayvel:news', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:skin-by-nickname', 'kayvel:status'
+    'kayvel:download-and-play', 'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
+    'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:memory-save', 'kayvel:memory-settings',
+    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:status'
   ]);
   const status = main.invoke('kayvel:status');
   assert.equal(Object.hasOwn(status, 'apiConfigured'), false);
   assert.equal(Object.hasOwn(status, 'account'), false);
   assert.equal(status.releaseConfigured, false);
-  assert.equal(status.javaFound, false);
+  assert.equal(Object.hasOwn(status, 'javaFound'), false);
+});
+
+test('game folder IPC opens only the fixed modded instance for a trusted renderer', async () => {
+  const opened = [];
+  const checked = [];
+  const main = await isolatedMain({
+    openPath: async path => { opened.push(path); return ''; },
+    overrides: { 'node:fs': { existsSync: () => false, lstatSync: path => {
+      checked.push(path);
+      return { isDirectory: () => true, isSymbolicLink: () => false };
+    } } }
+  });
+  const expected = main.invoke('kayvel:status').gamePath;
+  const result = await main.invoke('kayvel:open-game-folder', 'C:\\untrusted.exe', 'https://example.com');
+  assert.equal(result.ok, true);
+  assert.deepEqual(checked, [expected]);
+  assert.deepEqual(opened, [expected]);
+  await assert.rejects(main.handlers.get('kayvel:open-game-folder')({ sender: {} }, 'ru'), /Untrusted renderer/);
+  assert.equal(opened.length, 1);
+});
+
+test('game folder IPC reports missing folders and shell failures without creating or repairing anything', async () => {
+  for (const scenario of ['missing', 'file', 'link', 'shell-error', 'shell-throw']) {
+    let opens = 0;
+    const main = await isolatedMain({
+      openPath: async () => {
+        opens++;
+        if (scenario === 'shell-throw') throw new Error('private shell detail');
+        return 'private shell detail';
+      },
+      overrides: { 'node:fs': { existsSync: () => false, lstatSync: () => {
+        if (scenario === 'missing') throw Object.assign(new Error('missing'), { code: 'ENOENT' });
+        return { isDirectory: () => scenario !== 'file', isSymbolicLink: () => scenario === 'link' };
+      } } }
+    });
+    for (const language of ['ru', 'en']) {
+      const result = await main.invoke('kayvel:open-game-folder', language);
+      assert.equal(result.ok, false);
+      assert.doesNotMatch(result.message, /private shell detail/);
+      if (scenario === 'missing') assert.match(result.message, language === 'ru' ? /Сначала скачайте сборку/ : /Download the modpack first/);
+    }
+    assert.equal(opens, scenario.startsWith('shell-') ? 2 : 0);
+  }
 });
 
 test('main saves nickname and skin through the local store without an account session', async () => {
@@ -97,5 +164,179 @@ test('main refuses preparation and the old modpack without running installers', 
   assert.equal((await main.invoke('kayvel:install')).ok, false);
   assert.equal((await main.handlers.get('kayvel:install')({ sender: {} })).message, 'Недоступно.');
   assert.equal((await main.invoke('kayvel:play-vanilla', 'ru')).ok, false);
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, false);
+  assert.equal((await main.handlers.get('kayvel:download-and-play')({ sender: {} }, 'ru')).message, 'Недоступно.');
+  assert.equal(main.invoke('kayvel:status').preparationProgress, null);
+  assert.match(main.invoke('kayvel:status').gamePath, /instances/);
   assert.equal((await main.invoke('kayvel:play-neoforge', 'ru')).ok, false);
+});
+
+function preparedModules(prepareInstance, extra = {}) {
+  return {
+    'node:fs': { existsSync: path => path.endsWith(join('.preparation', 'ready.json')) },
+    './prepare-instance.js': {
+      instancePath: path => join(path, 'instances', 'fixture'), prepareInstance,
+      verifyPreparation: async () => { assert.fail('Verification after a declined launch'); },
+      preparedJava: () => { assert.fail('Java after a declined launch'); },
+      ...extra
+    },
+    './neoforge.js': { NEOFORGE_VERSION: '21.1.252', neoForgeReady: () => true, launchNeoForge: () => assert.fail('Real games are never launched by this test') }
+  };
+}
+
+test('one-click reports preparation progress and launches directly without a confirmation', async () => {
+  const { main, order, child } = await launchFixture(async (child, observe) => { observe(child); });
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, true);
+  child.emit('exit', 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, true);
+  assert.equal(order.filter(step => step === 'prepare').length, 2);
+  assert.equal(order.includes('confirm'), false);
+  assert.equal(main.invoke('kayvel:status').gameRunning, true);
+  assert.equal(main.invoke('kayvel:status').preparationProgress, null);
+});
+
+test('one-click validates nickname before preparing or opening a launch confirmation', async () => {
+  const main = await isolatedMain({ activateRelease: true,
+    overrides: preparedModules(async () => assert.fail('Invalid nickname must stop preparation'))
+  });
+  const result = await main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /nickname/);
+  assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'error');
+});
+
+test('one-click prevents concurrent preparation, launch and mod switches, with no retry after failure', async () => {
+  let rejectPreparation;
+  const stalled = new Promise((_resolve, reject) => { rejectPreparation = reject; });
+  let calls = 0;
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer',
+    overrides: preparedModules(() => { calls++; return stalled; })
+  });
+  const first = main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, true);
+  for (const channel of ['kayvel:download-and-play', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:mod-switch-set']) {
+    assert.equal((await main.invoke(channel, 'ru')).ok, false);
+  }
+  rejectPreparation(new Error('fixture preparation failed'));
+  assert.equal((await first).ok, false);
+  assert.equal(calls, 1);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
+  assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'error');
+});
+
+test('direct launch still performs final verification and releases its lock on failure', async () => {
+  const order = [];
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer',
+    confirm: async () => { order.push('confirm'); return { response: 1 }; },
+    overrides: {
+      ...preparedModules(async () => { order.push('prepare'); }, { verifyPreparation: async () => { order.push('verify'); throw new Error('fixture changed files'); } }),
+      './installer.js': { acquireGameDirectoryLock: async () => { order.push('lock'); return async () => { order.push('unlock'); }; } }
+    }
+  });
+  const result = await main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /changed files/);
+  assert.deepEqual(order, ['prepare', 'lock', 'verify', 'unlock']);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
+  assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'error');
+});
+
+for (const state of ['missing-record', 'incomplete', 'recorded']) {
+  test(`readiness requires a preparation record and no incomplete marker: ${state}`, async () => {
+    const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: {
+      ...preparedModules(async () => {}),
+      'node:fs': { existsSync: path => path.endsWith(join('.preparation', 'ready.json')) ? state !== 'missing-record'
+        : path.endsWith(join('.preparation', 'incomplete.json')) ? state === 'incomplete' : false }
+    } });
+    assert.equal(main.invoke('kayvel:status').neoforgeReady, state === 'recorded');
+    if (state !== 'recorded') assert.equal((await main.invoke('kayvel:play-neoforge', 'ru')).ok, false);
+  });
+}
+
+async function launchFixture(launch) {
+  const order = [];
+  const child = Object.assign(new EventEmitter(), { pid: 123, exitCode: null, signalCode: null });
+  const dependencies = preparedModules(async () => { order.push('prepare'); }, {
+    verifyPreparation: async () => { order.push('verify'); },
+    preparedJava: () => { order.push('java'); return 'fictional-java-never-executed'; }
+  });
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer',
+    confirm: async () => { order.push('confirm'); return { response: 1 }; },
+    overrides: {
+      ...dependencies,
+      './installer.js': { acquireGameDirectoryLock: async () => { order.push('lock'); return async () => { order.push('unlock'); }; } },
+      './game-process.js': { createGameExitReporter, watchLockedGame },
+      './neoforge.js': { ...dependencies['./neoforge.js'], launchNeoForge: async (path, name, java, observe, memoryMb) => {
+        order.push('launch');
+        assert.equal(memoryMb, main.invoke('kayvel:memory-settings').memoryMb);
+        assert.equal(name, 'LocalPlayer');
+        assert.equal(java, 'fictional-java-never-executed');
+        assert.match(path, /instances/);
+        await launch(child, observe);
+      } }
+    }
+  });
+  return { main, order, child };
+}
+
+test('RAM IPC validates the sender, saves the selection and passes it to launch', async () => {
+  const { main, child } = await launchFixture(async (child, observe) => { observe(child); });
+  assert.equal(main.invoke('kayvel:memory-settings').memoryMb, 6144);
+  assert.throws(() => main.handlers.get('kayvel:memory-save')({ sender: {} }, 8192), /Untrusted/);
+  assert.throws(() => main.invoke('kayvel:memory-save', '--inject'), /ОЗУ/);
+  assert.equal(main.invoke('kayvel:memory-save', 8192).memoryMb, 8192);
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, true);
+  assert.throws(() => main.invoke('kayvel:memory-save', 4096), /завершения/);
+  child.emit('exit', 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(main.invoke('kayvel:memory-save', 4096).memoryMb, 4096);
+});
+
+test('successful one-click observes a fictional process and holds its lock until one exit notification', async () => {
+  const { main, order, child } = await launchFixture(async (child, observe) => { observe(child); });
+  const result = await main.invoke('kayvel:download-and-play', 'en');
+  assert.equal(result.ok, true);
+  assert.deepEqual(order, ['prepare', 'lock', 'verify', 'java', 'launch']);
+  assert.equal(main.invoke('kayvel:status').gameRunning, true);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
+  assert.equal(main.invoke('kayvel:status').preparationProgress, null);
+  assert.match(main.invoke('kayvel:status').activeGamePath, /instances/);
+  assert.equal((await main.invoke('kayvel:download-and-play', 'en')).ok, false);
+  child.emit('exit', 0);
+  child.emit('exit', 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(order.filter(step => step === 'unlock').length, 1);
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
+  assert.equal(main.invoke('kayvel:status').activeGamePath, null);
+  assert.equal(main.invoke('kayvel:status').preparationProgress, null);
+  assert.equal(main.sent.filter(([channel, value]) => channel === 'kayvel:preparation-progress' && value === null).length, 2);
+  const exits = main.sent.filter(([channel]) => channel === 'kayvel:game-exit');
+  assert.equal(exits.length, 1);
+  assert.equal(exits[0][1].code, 0);
+});
+
+test('launch failure before process observation releases the lock and reports error without retry', async () => {
+  const { main, order } = await launchFixture(async () => { throw new Error('fixture spawn failed'); });
+  const result = await main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /spawn failed/);
+  assert.equal(order.filter(step => step === 'launch').length, 1);
+  assert.equal(order.at(-1), 'unlock');
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
+  assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'error');
+});
+
+test('missing process observation keeps the lock and blocks another launch after an ambiguous result', async () => {
+  const { main, order } = await launchFixture(async () => {});
+  const result = await main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(result.ok, false);
+  assert.match(result.message, /блокировка сохранена/);
+  assert.equal(order.includes('unlock'), false);
+  assert.equal(main.invoke('kayvel:status').gameRunning, true);
+  assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'error');
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, false);
+  assert.equal(order.filter(step => step === 'launch').length, 1);
 });

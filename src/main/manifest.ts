@@ -29,14 +29,19 @@ function releaseUrl(value: string): boolean {
   }
 }
 
-function managedPath(value: string): boolean {
+export function validManagedPath(value: string): boolean {
   const parts = value.split('/');
-  if (parts.length !== 2) return false;
-  const [directory, name] = parts;
-  const validName = directory === 'mods' ? /^[A-Za-z0-9._+\[\]-]+\.jar$/.test(name)
-    : directory === 'resourcepacks' && /^[A-Za-z0-9._+ \[\]-]+\.zip$/.test(name);
-  return validName && !/^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?: *\.| *$)/i.test(name) &&
-    !name.endsWith(' .jar') && !name.endsWith(' .zip');
+  if (parts.some(part => !part || part === '.' || part === '..' ||
+      /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(?: *\.| *$)/i.test(part))) return false;
+  if (parts.length === 2) {
+    const [directory, name] = parts;
+    const validName = directory === 'mods' ? /^[A-Za-z0-9._+\[\]-]+\.jar$/.test(name)
+      : directory === 'resourcepacks' && /^[A-Za-z0-9._+ \[\]-]+\.zip$/.test(name);
+    return validName && !name.endsWith(' .jar') && !name.endsWith(' .zip');
+  }
+  return /^kubejs\/(?:client_scripts|startup_scripts)\/[A-Za-z0-9_-][A-Za-z0-9._-]*\.js$/.test(value) ||
+    /^kubejs\/config\/[A-Za-z0-9_-][A-Za-z0-9._-]*\.json$/.test(value) ||
+    /^kubejs\/assets\/kubejs\/textures\/(?:block|item)\/[A-Za-z0-9_-][A-Za-z0-9._-]*\.png$/.test(value);
 }
 
 export function verifyManifest(bytes: Buffer, signatureBase64: string, publicKeyPem: string): Manifest {
@@ -56,7 +61,7 @@ export function verifyManifest(bytes: Buffer, signatureBase64: string, publicKey
   for (const item of data.files) {
     if (!record(item) || typeof item.path !== 'string' || typeof item.url !== 'string' ||
         typeof item.sha256 !== 'string' || typeof item.size !== 'number' ||
-        !managedPath(item.path) || !/^[a-f0-9]{64}$/.test(item.sha256) ||
+        !validManagedPath(item.path) || !/^[a-f0-9]{64}$/.test(item.sha256) ||
         !Number.isSafeInteger(item.size) || item.size < 1 || item.size > 1_000_000_000 ||
         !releaseUrl(item.url)) throw new Error('Invalid managed file');
     const key = item.path.toLowerCase();

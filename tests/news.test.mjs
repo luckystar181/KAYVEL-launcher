@@ -1,23 +1,21 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, writeFile, rm } from 'node:fs/promises';
-import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { createNewsStore } from '../dist/main/news.js';
+import { readFile } from 'node:fs/promises';
+import { launcherMainFiles } from '../scripts/launcher-main-files.mjs';
+import { fileURLToPath } from 'node:url';
 
-test('local news creates an editable sample and reads updates without a restart', async () => {
-  const dir = await mkdtemp(join(tmpdir(), 'kayvel-news-'));
-  try {
-    const store = createNewsStore(dir);
-    const sample = await store.read();
-    assert.equal(sample.length, 2);
-    assert.match((await readFile(store.path, 'utf8')), /Добро пожаловать/);
-    await writeFile(store.path, JSON.stringify([
-      { id: 'older', date: '2026-10-01', title: 'Первая', text: 'Текст' },
-      { id: 'newer', date: '2026-11-01', title: 'Вторая', text: 'Другая новость' }
-    ]));
-    assert.deepEqual((await store.read()).map(item => item.id), ['newer', 'older']);
-    await writeFile(store.path, '{invalid');
-    await assert.rejects(store.read());
-  } finally { await rm(dir, { recursive: true, force: true }); }
+test('news is absent from the renderer, IPC and portable runtime', async () => {
+  for (const path of ['src/renderer/app.tsx', 'src/renderer/style.css', 'src/main/main.ts', 'src/main/preload.cjs']) {
+    const source = await readFile(new URL(`../${path}`, import.meta.url), 'utf8');
+    assert.doesNotMatch(source, /news|Новости|новости/i);
+  }
+  const files = await launcherMainFiles(fileURLToPath(new URL('../dist/main', import.meta.url)));
+  assert.equal(files.includes('news.js'), false);
+});
+
+test('memory recommendation is 3–4 GB in both languages without changing allocation', async () => {
+  const source = await readFile(new URL('../src/renderer/app.tsx', import.meta.url), 'utf8');
+  assert.match(source, /Рекомендуется 3–4 ГБ/);
+  assert.match(source, /3–4 GB is recommended/);
+  assert.doesNotMatch(source, /6–8/);
 });
