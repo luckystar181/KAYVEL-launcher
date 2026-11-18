@@ -161,12 +161,18 @@ test('HTTP errors including rate limiting and partial content are not retried', 
   }
 });
 
-test('connection and body failures preserve the error and never trigger another request', async () => {
+test('connection and body failures retain the cause and server without retrying', async () => {
   let calls = 0;
   const failure = new Error('fictional ambiguous connection failure');
+  const check = error => {
+    assert.equal(error.cause, failure);
+    assert.match(error.message, /github\.com.*NETWORK_ERROR/);
+    assert.doesNotMatch(error.message, /fictional ambiguous connection failure/);
+    return true;
+  };
   await assert.rejects(downloadReleaseBytes(url, payload.length, {
     request: async () => { calls++; throw failure; }
-  }), error => error === failure);
+  }), check);
   assert.equal(calls, 1);
   calls = 0;
   await assert.rejects(downloadReleaseBytes(url, payload.length, {
@@ -174,9 +180,108 @@ test('connection and body failures preserve the error and never trigger another 
       calls++;
       return new Response(new ReadableStream({ start(controller) { controller.error(failure); } }));
     }
-  }), error => error === failure);
+  }), check);
   assert.equal(calls, 1);
 });
+
+test('known nested DNS, socket and TLS causes are safe and actionable', async () => {
+  for (const [code, reason] of [
+    ['ENOTFOUND', /DNS/], ['EAI_AGAIN', /DNS/], ['ECONNRESET', /сброшено/],
+    ['UND_ERR_SOCKET', /оборвалось/], ['UND_ERR_CONNECT_TIMEOUT', /ожидания/],
+    ['CERT_HAS_EXPIRED', /дату Windows/], ['SELF_SIGNED_CERT_IN_CHAIN', /сертификат/],
+    ['ERR_TLS_CERT_ALTNAME_INVALID', /Сертификат/]
+  ]) {
+    const cause = Object.assign(new Error(`private ${cdn}`), { code });
+    const failure = new TypeError('fetch failed', { cause: new AggregateError([new Error('other'), cause]) });
+    let calls = 0;
+    await assert.rejects(downloadReleaseBytes(url, payload.length, {
+      request: async () => { calls++; throw failure; }
+    }), error => {
+      assert.equal(error.cause, failure);
+      assert.ok(error.message.includes(`[${code}]`));
+      assert.match(error.message, reason);
+      assert.match(error.message, /github\.com/);
+      assert.doesNotMatch(error.message, /https:|temporary|private|fetch failed/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+test('cyclic, unknown and excessive transport causes terminate with a safe fallback', async () => {
+  const cyclic = new Error('private');
+  cyclic.cause = cyclic;
+  cyclic.errors = [cyclic, Object.assign(new Error('private'), { code: 'ENOTFOUND' })];
+  let deep = Object.assign(new Error('private'), { code: 'ENOTFOUND' });
+  for (let i = 0; i < 100; i++) deep = new Error('private', { cause: deep });
+  for (const [failure, code] of [
+    [cyclic, 'ENOTFOUND'], [deep, 'NETWORK_ERROR'],
+    [Object.assign(new Error(cdn), { code: 'constructor' }), 'NETWORK_ERROR'],
+    [Object.assign(new Error(cdn), { code: '__proto__' }), 'NETWORK_ERROR'],
+    [null, 'NETWORK_ERROR'], ['private ' + cdn, 'NETWORK_ERROR']
+  ]) {
+    await assert.rejects(downloadReleaseBytes(url, payload.length, {
+      request: async () => { throw failure; }
+    }), error => {
+      assert.equal(error.cause, failure);
+      assert.ok(error.message.includes(`[${code}]`));
+      assert.doesNotMatch(error.message, /https:|temporary|private|constructor|__proto__/);
+      return true;
+    });
+  }
+});
+
+test('aggregate transport causes identify DNS, TLS and socket failures without exposing messages', async () => {
+  for (const code of ['ENOTFOUND', 'EAI_AGAIN', 'CERT_HAS_EXPIRED', 'SELF_SIGNED_CERT_IN_CHAIN', 'UND_ERR_SOCKET', 'UND_ERR_CONNECT_TIMEOUT']) {
+    const detail = Object.assign(new Error('private ' + cdn), { code });
+    const aggregate = new AggregateError([new Error('private alternative ' + url), detail], 'private aggregate');
+    aggregate.cause = aggregate;
+    const failure = new TypeError('fetch failed', { cause: aggregate });
+    let calls = 0;
+    await assert.rejects(downloadReleaseBytes(url, payload.length, {
+      request: async () => { calls++; throw failure; }
+    }), error => {
+      assert.equal(error.cause, failure);
+      assert.ok(error.message.includes(`[${code}]`));
+      assert.match(error.message, /github\.com/);
+      assert.doesNotMatch(error.message, /https:|private|temporary=|fixture/);
+      return true;
+    });
+    assert.equal(calls, 1);
+  }
+});
+
+for (const mode of ['request', 'stream', 'http', 'timeout']) {
+  test(`redirected ${mode} failure reports only the failing CDN hostname`, { timeout: 2000 }, async () => {
+    const failure = new TypeError('fetch failed ' + cdn, {
+      cause: Object.assign(new Error('private signed URL ' + cdn), { code: 'ECONNRESET' })
+    });
+    const calls = [];
+    await assert.rejects(downloadReleaseBytes(url, payload.length, {
+      timeoutMs: mode === 'timeout' ? 100 : 1000,
+      request: async requested => {
+        calls.push(requested);
+        if (requested === url) return new Response(null, { status: 302, headers: { location: cdn } });
+        if (mode === 'request') throw failure;
+        if (mode === 'http') return new Response(null, { status: 503 });
+        return new Response(new ReadableStream({
+          start(controller) { if (mode === 'stream') controller.error(failure); }
+        }));
+      }
+    }), error => {
+      assert.match(error.message, /release-assets\.githubusercontent\.com/);
+      assert.doesNotMatch(error.message, /https:|temporary|fixture|private|example\/file/);
+      if (mode === 'http') assert.match(error.message, /HTTP status 503/);
+      else if (mode === 'timeout') assert.match(error.message, /timed out/);
+      else {
+        assert.match(error.message, /ECONNRESET/);
+        assert.equal(error.cause, failure);
+      }
+      return true;
+    });
+    assert.deepEqual(calls, [url, cdn]);
+  });
+}
 
 test('invalid lengths, oversized bodies and encoded responses are rejected and cancelled', async () => {
   for (const headers of [

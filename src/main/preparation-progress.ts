@@ -1,4 +1,4 @@
-export type PreparationStage = 'java' | 'minecraft' | 'neoforge' | 'modpack' | 'verify' | 'ready' | 'launch' | 'error';
+export type PreparationStage = 'discovery' | 'java' | 'minecraft' | 'neoforge' | 'modpack' | 'verify' | 'ready' | 'launch' | 'error';
 export type PreparationProgress = {
   stage: PreparationStage;
   file: string;

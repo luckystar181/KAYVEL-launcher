@@ -98,14 +98,23 @@ for (const actionThrows of [false, true]) {
     const started = new Promise(resolve => { requestStarted = resolve; });
     let unblock;
     const response = new Promise(resolve => { unblock = resolve; });
-    t.mock.method(globalThis, 'fetch', async () => { requestStarted(); await response; throw new Error('fixture transfer failed'); });
+    const failure = new Error('fixture transfer failed');
+    t.mock.method(globalThis, 'fetch', async () => { requestStarted(); await response; throw failure; });
     let settled = false;
     const pending = withInstallationLock(root, async install => {
       void install(url, publicKey);
       assert.throws(() => install(url, publicKey), /уже начата/);
       if (actionThrows) throw new Error('fixture action failed');
     }).finally(() => { settled = true; });
-    const rejection = assert.rejects(pending, actionThrows ? /fixture action failed/ : /fixture transfer failed/);
+    const rejection = assert.rejects(pending, error => {
+      if (actionThrows) assert.match(error.message, /fixture action failed/);
+      else {
+        assert.equal(error.cause, failure);
+        assert.match(error.message, /github\.com.*NETWORK_ERROR/);
+        assert.doesNotMatch(error.message, /fixture transfer failed/);
+      }
+      return true;
+    });
     await started;
     await new Promise(resolve => setImmediate(resolve));
     assert.equal(settled, false);

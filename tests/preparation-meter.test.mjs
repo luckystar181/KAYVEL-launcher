@@ -16,6 +16,15 @@ const { PreparationMeter } = exports;
 const base = { stage: 'minecraft', file: 'libraries/fixture.jar', received: 1_048_576, total: 4_194_304, completedFiles: 2, totalFiles: 8 };
 const render = (progress, lang = 'ru') => renderToStaticMarkup(React.createElement(PreparationMeter, { progress, lang }));
 
+test('discovery has its own indeterminate stage in both languages', () => {
+  for (const [lang, label] of [['ru', 'Проверка доступной сборки'], ['en', 'Checking available modpack']]) {
+    const html = render({ ...base, stage: 'discovery', file: '', received: 0, total: null, completedFiles: 0, totalFiles: null }, lang);
+    assert.ok(html.includes(label));
+    assert.doesNotMatch(html, /\d+%|NaN|Infinity/);
+    assert.match(html, /preparation-track indeterminate/);
+  }
+});
+
 test('preparation meter renders actual byte totals, file counts and percentage', () => {
   const html = render(base);
   assert.match(html, /Minecraft 1.21.1/);

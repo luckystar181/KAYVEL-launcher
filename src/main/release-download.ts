@@ -3,6 +3,49 @@ import { validReleaseUrl } from './manifest.js';
 type DownloadOptions = { request?: typeof fetch; timeoutMs?: number };
 const downloadTimeoutMs = 180_000;
 const redirectStatuses = new Set([301, 302, 303, 307, 308]);
+const transportReasons: Record<string, string> = {
+  ENOTFOUND: 'Не удалось определить адрес сервера (DNS).',
+  EAI_AGAIN: 'Сервер DNS временно недоступен.',
+  ECONNRESET: 'Соединение с сервером было сброшено.',
+  ECONNREFUSED: 'Сервер отклонил соединение.',
+  ENETUNREACH: 'Сеть недоступна.',
+  EHOSTUNREACH: 'Сервер недоступен.',
+  ETIMEDOUT: 'Истекло время ожидания соединения.',
+  UND_ERR_CONNECT_TIMEOUT: 'Истекло время ожидания соединения.',
+  UND_ERR_HEADERS_TIMEOUT: 'Сервер не прислал ответ вовремя.',
+  UND_ERR_BODY_TIMEOUT: 'Сервер перестал передавать файл.',
+  UND_ERR_SOCKET: 'Соединение оборвалось при передаче данных.',
+  CERT_HAS_EXPIRED: 'Срок действия сертификата сервера истёк. Проверьте дату Windows.',
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: 'Не удалось проверить сертификат сервера.',
+  DEPTH_ZERO_SELF_SIGNED_CERT: 'Получен недоверенный сертификат сервера.',
+  SELF_SIGNED_CERT_IN_CHAIN: 'В цепочке сервера обнаружен недоверенный сертификат.',
+  ERR_TLS_CERT_ALTNAME_INVALID: 'Сертификат не соответствует адресу сервера.'
+};
+
+function transportReason(error: unknown): [string, string] {
+  const pending = [error];
+  const seen = new Set<unknown>();
+  for (let index = 0; index < pending.length && index < 32; index++) {
+    const current = pending[index];
+    if (!current || typeof current !== 'object' || seen.has(current)) continue;
+    seen.add(current);
+    const { code, cause, errors } = current as { code?: unknown; cause?: unknown; errors?: unknown };
+    if (typeof code === 'string' && Object.hasOwn(transportReasons, code)) return [code, transportReasons[code]];
+    if (cause) pending.push(cause);
+    if (Array.isArray(errors)) pending.push(...errors.slice(0, 8));
+  }
+  return ['NETWORK_ERROR', 'Не удалось получить данные от сервера. Проверьте соединение и доступ к этому серверу.'];
+}
+
+class ResponseTransportError extends Error {}
+
+class DownloadTransportError extends Error {
+  constructor(url: string, cause: unknown) {
+    const [code, reason] = transportReason(cause);
+    super(`Ошибка загрузки с ${new URL(url).hostname} [${code}]: ${reason}`, { cause });
+    this.name = 'DownloadTransportError';
+  }
+}
 
 export function releaseDownloadUrl(value: string): string {
   const url = new URL(value);
@@ -45,7 +88,7 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > downloadTimeoutMs) throw new Error('Invalid download timeout');
   const controller = new AbortController();
   const { signal } = controller;
-  const timeout = setTimeout(() => controller.abort(new Error('Download timed out; automatic retry is disabled')), timeoutMs);
+  const timeout = setTimeout(() => controller.abort(new Error(`Download timed out (${new URL(current).hostname}); automatic retry is disabled`)), timeoutMs);
   const visited = new Set<string>();
   let activeResponse: Response | undefined;
   try {
@@ -53,21 +96,27 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
       signal.throwIfAborted();
       if (visited.has(current)) throw new Error('Download redirect loop');
       visited.add(current);
-      const response = await waitFor(request(current, {
-        redirect: 'manual', signal, credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer',
-        headers: { 'Accept-Encoding': 'identity' }
-      }).then(result => {
-        if (signal.aborted) {
-          if (result.body) void result.body.cancel().catch(() => {});
-          signal.throwIfAborted();
-        }
-        return result;
-      }), signal);
+      let response: Response;
+      try {
+        response = await waitFor(request(current, {
+          redirect: 'manual', signal, credentials: 'omit', cache: 'no-store', referrerPolicy: 'no-referrer',
+          headers: { 'Accept-Encoding': 'identity' }
+        }).then(result => {
+          if (signal.aborted) {
+            if (result.body) void result.body.cancel().catch(() => {});
+            signal.throwIfAborted();
+          }
+          return result;
+        }), signal);
+      } catch (error) {
+        signal.throwIfAborted();
+        throw new DownloadTransportError(current, error);
+      }
       activeResponse = response;
       signal.throwIfAborted();
       if (response.redirected) throw new Error('Unexpected automatic download redirect');
       if (!redirectStatuses.has(response.status)) {
-        if (response.status !== 200) throw new Error('Download failed with HTTP status ' + response.status);
+        if (response.status !== 200) throw new Error(`Download failed with HTTP status ${response.status} (${new URL(current).hostname})`);
         const result = await consume(response, signal);
         signal.throwIfAborted();
         return result;
@@ -80,6 +129,9 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
       current = validateUrl(new URL(location, current).href);
     }
     throw new Error('Too many download redirects');
+  } catch (error) {
+    if (error instanceof ResponseTransportError) throw new DownloadTransportError(current, error.cause);
+    throw error;
   } finally {
     clearTimeout(timeout);
     controller.abort();
@@ -112,7 +164,13 @@ export async function readReleaseBody(response: Response, limit: number, signal:
   try {
     while (true) {
       signal.throwIfAborted();
-      const { value, done } = await waitFor(reader.read(), signal);
+      let chunk: ReadableStreamReadResult<Uint8Array>;
+      try { chunk = await waitFor(reader.read(), signal); }
+      catch (error) {
+        signal.throwIfAborted();
+        throw new ResponseTransportError('Download response stream failed', { cause: error });
+      }
+      const { value, done } = chunk;
       signal.throwIfAborted();
       if (done) break;
       size += value.byteLength;

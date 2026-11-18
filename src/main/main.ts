@@ -249,22 +249,28 @@ ipcMain.handle('kayvel:download-and-play', async (event, language: unknown) => {
   if (!localProfileReleaseReady || !RELEASE_MANIFEST_URL || !MANIFEST_PUBLIC_KEY_PEM) return { ok: false, message: 'Новый подписанный выпуск сборки ещё не настроен.' };
   if (modSwitching || preparingNeoForge || preparingVanilla || installing || gameRunning) return { ok: false, message: 'Подготовка или игра уже выполняется.' };
   preparingNeoForge = true;
+  let phase = 'Проверка параметров установки';
   try {
+    stageProgress(reportPreparation, 'verify', phase);
     validateNickname(localProfile.read().nickname);
     memorySettings.read();
     let manifestUrl = RELEASE_MANIFEST_URL;
     let expectedManifest: Buffer | undefined;
     if (!existsSync(neoforgePath())) {
+      phase = 'Проверка доступной сборки';
+      stageProgress(reportPreparation, 'discovery', phase);
       const latest = await discoverModpack(RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM);
       manifestUrl = modpackReleaseUrl(RELEASE_MANIFEST_URL, latest.manifest.buildVersion);
       expectedManifest = latest.bytes;
     }
+    phase = 'Подготовка экземпляра';
     await prepareInstance(app.getPath('userData'), manifestUrl, MANIFEST_PUBLIC_KEY_PEM, reportPreparation, undefined, expectedManifest);
     preparingNeoForge = false;
     return await playPreparedNeoForge(language);
   } catch (error) {
-    stageProgress(reportPreparation, 'error', 'Операция остановлена; файлы сохранены для проверки.');
-    return { ok: false, message: error instanceof Error ? error.message : 'Не удалось подготовить игру.' };
+    const message = `${phase}: ${error instanceof Error ? error.message : 'Не удалось подготовить игру.'}`;
+    stageProgress(reportPreparation, 'error', message);
+    return { ok: false, message };
   } finally { preparingNeoForge = false; }
 });
 

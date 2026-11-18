@@ -2,8 +2,8 @@ import React from 'react';
 import type { PreparationProgress } from '../main/preparation-progress';
 
 const labels = {
-  ru: { java: 'Java 21', minecraft: 'Minecraft 1.21.1', neoforge: 'NeoForge 21.1.252', modpack: 'Подписанная сборка', verify: 'Проверка файлов', ready: 'Готово', launch: 'Запуск игры', error: 'Операция остановлена' },
-  en: { java: 'Java 21', minecraft: 'Minecraft 1.21.1', neoforge: 'NeoForge 21.1.252', modpack: 'Signed modpack', verify: 'Verifying files', ready: 'Ready', launch: 'Launching game', error: 'Operation stopped' }
+  ru: { discovery: 'Проверка доступной сборки', java: 'Java 21', minecraft: 'Minecraft 1.21.1', neoforge: 'NeoForge 21.1.252', modpack: 'Подписанная сборка', verify: 'Проверка файлов', ready: 'Готово', launch: 'Запуск игры', error: 'Операция остановлена' },
+  en: { discovery: 'Checking available modpack', java: 'Java 21', minecraft: 'Minecraft 1.21.1', neoforge: 'NeoForge 21.1.252', modpack: 'Signed modpack', verify: 'Verifying files', ready: 'Ready', launch: 'Launching game', error: 'Operation stopped' }
 };
 
 function bytes(value: number): string {

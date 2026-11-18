@@ -63,7 +63,12 @@ export class PreparationFiles {
           await this.record(file.path);
           completedFiles++;
           report({ stage, file: file.path, received, total, completedFiles, totalFiles: queue.length });
-        } catch (error) { failure ??= error; throw error; }
+        } catch (error) {
+          const detail = error instanceof Error ? error.message : 'Неизвестная ошибка.';
+          const failureWithFile = new Error(`Файл ${file.path}: ${detail}`, { cause: error });
+          failure ??= failureWithFile;
+          throw failureWithFile;
+        }
       }
     }));
     const rejected = results.find(result => result.status === 'rejected');

@@ -232,6 +232,34 @@ test('one-click prevents concurrent preparation, launch and mod switches, with n
   assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'error');
 });
 
+test('discovery failure reports its phase before preparing any instance and allows only an explicit retry', async () => {
+  let calls = 0;
+  let rejectDiscovery;
+  const stalled = new Promise((_resolve, reject) => { rejectDiscovery = reject; });
+  const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: {
+    ...preparedModules(async () => assert.fail('Discovery failure must not prepare an instance')),
+    'node:fs': { existsSync: () => false, lstatSync: missingEntry },
+    './modpack-channel.js': { compareModpackVersions, modpackReleaseUrl, discoverModpack: () => { calls++; return stalled; } }
+  } });
+  const pending = main.invoke('kayvel:download-and-play', 'ru');
+  assert.equal(main.invoke('kayvel:status').preparingNeoForge, true);
+  assert.equal(main.invoke('kayvel:status').preparationProgress.stage, 'discovery');
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, false);
+  assert.equal(calls, 1);
+  rejectDiscovery(new Error('github.com [ENOTFOUND]: fixture DNS failure'));
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.match(result.message, /^Проверка доступной сборки:.*ENOTFOUND/);
+  assert.doesNotMatch(result.message, /сохранены|Подготовка экземпляра/);
+  const status = main.invoke('kayvel:status');
+  assert.equal(status.preparingNeoForge, false);
+  assert.equal(status.preparationProgress.stage, 'error');
+  assert.equal(status.preparationProgress.file, result.message);
+  assert.equal(calls, 1);
+  assert.equal((await main.invoke('kayvel:download-and-play', 'ru')).ok, false);
+  assert.equal(calls, 2);
+});
+
 test('direct launch still performs final verification and releases its lock on failure', async () => {
   const order = [];
   const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer',

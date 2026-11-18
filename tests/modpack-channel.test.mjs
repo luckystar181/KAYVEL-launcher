@@ -51,8 +51,14 @@ for (const target of ['https://github.com/example/other/releases/download/v0.2.1
 
 test('channel preserves download bounds and does not retry network failures', async t => {
   let calls = 0;
-  t.mock.method(globalThis, 'fetch', async () => { calls++; throw new Error('fixture network failure'); });
-  await assert.rejects(discoverModpack(pinnedUrl, publicKey), /fixture network failure/);
+  const failure = new Error('fixture network failure');
+  t.mock.method(globalThis, 'fetch', async () => { calls++; throw failure; });
+  await assert.rejects(discoverModpack(pinnedUrl, publicKey), error => {
+    assert.equal(error.cause, failure);
+    assert.match(error.message, /github\.com.*NETWORK_ERROR/);
+    assert.doesNotMatch(error.message, /fixture network failure/);
+    return true;
+  });
   assert.equal(calls, 1);
 });
 

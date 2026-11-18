@@ -109,6 +109,24 @@ test('preparation downloads deduplicate matching plans, record SHA-256 and never
   assert.equal(requests, 1);
 });
 
+test('failed preparation download identifies its relative file and preserves the network cause', async t => {
+  const root = await workspace(t);
+  const failure = new TypeError('private signed URL', {
+    cause: Object.assign(new Error('private network detail'), { code: 'ENOTFOUND' })
+  });
+  let calls = 0;
+  mockFetch(t, async () => { calls++; throw failure; });
+  const files = new PreparationFiles(root);
+  await assert.rejects(files.downloads([plan('libraries/fixture.jar')], 'minecraft', () => {}), error => {
+    assert.match(error.message, /^Файл libraries\/fixture\.jar:.*libraries\.minecraft\.net.*ENOTFOUND/);
+    assert.doesNotMatch(error.message, /private|https:/);
+    assert.equal(error.cause.cause, failure);
+    return true;
+  });
+  assert.equal(calls, 1);
+  assert.equal(files.receipts.size, 0);
+});
+
 test('download workers stop scheduling on error and settle all in-flight writes before rejecting', async t => {
   const root = await workspace(t);
   let count = 0;
