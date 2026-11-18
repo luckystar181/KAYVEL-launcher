@@ -11,6 +11,10 @@ import { EventEmitter } from 'node:events';
 import { createGameExitReporter, watchLockedGame } from '../dist/main/game-process.js';
 import { MANIFEST_PUBLIC_KEY_PEM, RELEASE_MANIFEST_URL } from '../dist/main/release.js';
 import { createPublicKey } from 'node:crypto';
+import { compareModpackVersions, modpackReleaseUrl } from '../dist/main/modpack-channel.js';
+
+const missingEntry = () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); };
+const fixtureCandidate = { manifest: { buildVersion: 'v0.2.2-v3S' }, bytes: Buffer.from('fixture'), signature: 'fixture' };
 
 test('published local-profile release is configured without the historical Core release', async () => {
   assert.equal(RELEASE_MANIFEST_URL, 'https://github.com/luckystar181/KAYVEL-mods/releases/download/v0.2.0-v3S/manifest.json');
@@ -43,10 +47,12 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
       session: { defaultSession: { setPermissionRequestHandler() {}, webRequest: { onHeadersReceived() {} } } },
       screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 820 } }) }
     },
-    'node:fs': { existsSync: () => false },
+    'node:fs': { existsSync: () => false, lstatSync: missingEntry },
     'node:path': { join },
     'node:url': { fileURLToPath },
-    './installer.js': {},
+    './installer.js': { getInstalledManifest: async () => undefined },
+    './modpack-channel.js': { compareModpackVersions, modpackReleaseUrl, discoverModpack: async () => fixtureCandidate },
+    './modpack-update.js': { updateModpack: () => assert.fail('Unexpected modpack update') },
     './mod-switches.js': {},
     './game-process.js': {},
     './release.js': { MANIFEST_PUBLIC_KEY_PEM: 'fictional-public-key', RELEASE_MANIFEST_URL: activateRelease ? 'https://github.com/example/kayvel/releases/download/fixture/manifest.json' : '' },
@@ -97,7 +103,7 @@ test('main registers local-profile operations but no KAYVEL account or remote sk
   assert.deepEqual([...main.handlers.keys()].sort(), [
     'kayvel:download-and-play', 'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
     'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:memory-save', 'kayvel:memory-settings',
-    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:status'
+    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:modpack-check', 'kayvel:modpack-update', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:status'
   ]);
   const status = main.invoke('kayvel:status');
   assert.equal(Object.hasOwn(status, 'apiConfigured'), false);
@@ -174,7 +180,7 @@ test('main refuses preparation and the old modpack without running installers', 
 
 function preparedModules(prepareInstance, extra = {}) {
   return {
-    'node:fs': { existsSync: path => path.endsWith(join('.preparation', 'ready.json')) },
+    'node:fs': { existsSync: path => path.endsWith(join('.preparation', 'ready.json')) || path.endsWith(join('instances', 'fixture')), lstatSync: missingEntry },
     './prepare-instance.js': {
       instancePath: path => join(path, 'instances', 'fixture'), prepareInstance,
       verifyPreparation: async () => { assert.fail('Verification after a declined launch'); },
@@ -249,7 +255,7 @@ for (const state of ['missing-record', 'incomplete', 'recorded']) {
     const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: {
       ...preparedModules(async () => {}),
       'node:fs': { existsSync: path => path.endsWith(join('.preparation', 'ready.json')) ? state !== 'missing-record'
-        : path.endsWith(join('.preparation', 'incomplete.json')) ? state === 'incomplete' : false }
+        : path.endsWith(join('.preparation', 'incomplete.json')) ? state === 'incomplete' : false, lstatSync: missingEntry }
     } });
     assert.equal(main.invoke('kayvel:status').neoforgeReady, state === 'recorded');
     if (state !== 'recorded') assert.equal((await main.invoke('kayvel:play-neoforge', 'ru')).ok, false);
@@ -389,5 +395,140 @@ for (const failSkin of [false, true]) {
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(order.at(-1), 'unlock');
     }
+  });
+}
+
+function deferred() {
+  let resolve;
+  const promise = new Promise(done => { resolve = done; });
+  return { promise, resolve };
+}
+
+async function updateMain({ installedVersion = 'v0.2.0-v3S', installedBytes = Buffer.from('old'), discover, apply, ...options } = {}) {
+  return isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', ...options, overrides: {
+    './installer.js': { getInstalledManifest: async () => installedVersion ? { manifest: { buildVersion: installedVersion }, bytes: installedBytes } : undefined },
+    './modpack-channel.js': { compareModpackVersions, modpackReleaseUrl, discoverModpack: discover ?? (async () => fixtureCandidate) },
+    './modpack-update.js': { updateModpack: apply ?? (() => assert.fail('No automatic update is authorized')) },
+    ...options.overrides
+  } });
+}
+
+for (const [installedVersion, installedBytes, expected] of [
+  ['v0.2.0-v3S', Buffer.from('old'), 'available'],
+  ['v0.2.2-v3S', fixtureCandidate.bytes, 'current'],
+  ['v0.2.2-v3S', Buffer.from('republished'), 'error'],
+  ['v0.2.3-v3S', Buffer.from('newer'), 'error'],
+  [null, null, 'not-installed']
+]) {
+  test(`update IPC classifies installed version without applying or launching: ${installedVersion}/${expected}`, async () => {
+    const main = await updateMain({ installedVersion, installedBytes });
+    const result = await main.invoke('kayvel:modpack-check', { url: 'https://untrusted.invalid', path: 'C:\\untrusted' });
+    assert.equal(result.state, expected);
+    assert.equal(main.invoke('kayvel:status').modpackUpdate.state, expected);
+    assert.equal(main.invoke('kayvel:status').gameRunning, false);
+    assert.equal(Object.hasOwn(result, 'bytes'), false);
+    assert.equal(Object.hasOwn(result, 'signature'), false);
+    result.state = 'available';
+    if (expected !== 'available') assert.equal((await main.invoke('kayvel:modpack-update', fixtureCandidate)).ok, false);
+  });
+}
+
+test('update IPC requires trusted sender and a private checked candidate, ignoring all caller arguments', async () => {
+  const calls = [];
+  const main = await updateMain({ apply: async (...args) => {
+    calls.push(args);
+    return { version: fixtureCandidate.manifest.buildVersion, backup: 'fixture-backup' };
+  } });
+  assert.throws(() => main.handlers.get('kayvel:modpack-check')({ sender: {} }), /Untrusted renderer/);
+  assert.equal((await main.handlers.get('kayvel:modpack-update')({ sender: {} }, fixtureCandidate)).ok, false);
+  assert.equal((await main.invoke('kayvel:modpack-update', fixtureCandidate)).ok, false);
+  await main.invoke('kayvel:modpack-check');
+  const result = await main.invoke('kayvel:modpack-update', { bytes: 'untrusted', signature: 'untrusted', manifest: { buildVersion: 'v99.0.0-v3S' } }, 'C:\\untrusted');
+  assert.equal(result.ok, true);
+  assert.equal(calls.length, 1);
+  assert.equal(calls[0][0], main.invoke('kayvel:status').gamePath);
+  assert.equal(calls[0][1], fixtureCandidate);
+  assert.equal(calls[0][2], 'fictional-public-key');
+  assert.equal(typeof calls[0][3], 'function');
+  assert.equal(calls[0].length, 4);
+  assert.equal(main.invoke('kayvel:status').modpackUpdate.state, 'current');
+  assert.equal(main.invoke('kayvel:status').installing, false);
+  assert.equal(main.invoke('kayvel:status').gameRunning, false);
+  assert.equal((await main.invoke('kayvel:modpack-update')).ok, false);
+});
+
+test('checking is coalesced and updating blocks competing preparation, launch, switches and checks', async () => {
+  const discovery = deferred();
+  const application = deferred();
+  let discoveries = 0;
+  let updates = 0;
+  const main = await updateMain({
+    discover: async () => { discoveries++; return discovery.promise; },
+    apply: async () => { updates++; return application.promise; }
+  });
+  const checking = main.invoke('kayvel:modpack-check');
+  assert.equal((await main.invoke('kayvel:modpack-check')).state, 'checking');
+  assert.equal((await main.invoke('kayvel:modpack-update')).ok, false);
+  discovery.resolve(fixtureCandidate);
+  await checking;
+  const updating = main.invoke('kayvel:modpack-update');
+  assert.equal(main.invoke('kayvel:status').installing, true);
+  assert.equal((await main.invoke('kayvel:modpack-check')).state, 'updating');
+  for (const channel of ['kayvel:modpack-update', 'kayvel:download-and-play', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:mod-switch-set']) {
+    assert.equal((await main.invoke(channel)).ok, false, channel);
+  }
+  application.resolve({ version: 'v0.2.2-v3S', backup: 'fixture-backup' });
+  assert.equal((await updating).ok, true);
+  assert.equal(discoveries, 1);
+  assert.equal(updates, 1);
+});
+
+for (const phase of ['discovery', 'application']) {
+  test(`update IPC clears candidate and busy state after ${phase} error`, async () => {
+    let calls = 0;
+    const main = await updateMain({
+      discover: async () => { if (phase === 'discovery') throw new Error('fixture discovery failure'); return fixtureCandidate; },
+      apply: async () => { calls++; throw new Error('fixture application failure'); }
+    });
+    await main.invoke('kayvel:modpack-check');
+    if (phase === 'application') assert.equal((await main.invoke('kayvel:modpack-update')).ok, false);
+    const status = main.invoke('kayvel:status');
+    assert.equal(status.modpackUpdate.state, 'error');
+    assert.match(status.modpackUpdate.message, /fixture .* failure/);
+    assert.equal(status.installing, false);
+    assert.equal(status.gameRunning, false);
+    assert.equal((await main.invoke('kayvel:modpack-update')).ok, false);
+    assert.equal(calls, phase === 'application' ? 1 : 0);
+  });
+}
+
+test('incomplete update blocks discovery and readiness even for an otherwise prepared instance', async () => {
+  const main = await updateMain({ overrides: {
+    ...preparedModules(async () => assert.fail('Unexpected preparation')),
+    'node:fs': { existsSync: () => true, lstatSync: () => ({}) }
+  } });
+  assert.equal(main.invoke('kayvel:status').neoforgeReady, false);
+  assert.equal((await main.invoke('kayvel:modpack-check')).state, 'error');
+  assert.equal((await main.invoke('kayvel:play-neoforge')).ok, false);
+});
+
+for (const existing of [false, true]) {
+  test(`initial preparation uses latest only for a fresh instance; existing=${existing}`, async () => {
+    const prepared = [];
+    let discoveries = 0;
+    const main = await updateMain({ overrides: {
+      'node:fs': { existsSync: () => existing, lstatSync: missingEntry },
+      './modpack-channel.js': { compareModpackVersions, modpackReleaseUrl, discoverModpack: async () => { discoveries++; return fixtureCandidate; } },
+      './prepare-instance.js': {
+        instancePath: path => join(path, 'instances', 'fixture'),
+        prepareInstance: async (...args) => { prepared.push(args); throw new Error('stop before any launch'); }
+      }
+    } });
+    assert.equal((await main.invoke('kayvel:download-and-play')).ok, false);
+    assert.equal(discoveries, existing ? 0 : 1);
+    assert.equal(prepared.length, 1);
+    assert.match(prepared[0][1], existing ? /\/fixture\/manifest.json$/ : /\/v0.2.2-v3S\/manifest.json$/);
+    assert.equal(prepared[0][5], existing ? undefined : fixtureCandidate.bytes);
+    assert.equal(main.invoke('kayvel:status').gameRunning, false);
   });
 }

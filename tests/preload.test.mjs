@@ -22,8 +22,8 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   ipcRenderer.invoke = (...args) => { calls.push(args); return Promise.resolve({}); };
   const api = await loadPreload(ipcRenderer);
   assert.deepEqual(Object.keys(api).sort(), [
-    'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
-    'playNeoForge', 'playVanilla', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'window'
+    'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
+    'playNeoForge', 'playVanilla', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'updateModpack', 'window'
   ]);
   await api.localProfile();
   await api.saveLocalNickname('LocalPlayer');
@@ -32,9 +32,12 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   await api.memorySettings();
   await api.saveMemoryMb(8192);
   await api.openGameFolder('ru');
+  await api.checkModpackUpdates({ url: 'https://untrusted.invalid' }, 'C:\\untrusted');
+  await api.updateModpack({ signature: 'untrusted', bytes: 'untrusted' }, 'C:\\untrusted');
   assert.deepEqual(calls, [
     ['kayvel:local-profile'], ['kayvel:local-nickname-save', 'LocalPlayer'], ['kayvel:local-skin-save', png, 'slim'],
-    ['kayvel:memory-settings'], ['kayvel:memory-save', 8192], ['kayvel:open-game-folder', 'ru']
+    ['kayvel:memory-settings'], ['kayvel:memory-save', 8192], ['kayvel:open-game-folder', 'ru'],
+    ['kayvel:modpack-check'], ['kayvel:modpack-update']
   ]);
 });
 

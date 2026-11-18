@@ -2,7 +2,9 @@ import { app, BrowserWindow, ipcMain, nativeImage, session, screen, shell } from
 import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { acquireGameDirectoryLock } from './installer.js';
+import { acquireGameDirectoryLock, getInstalledManifest } from './installer.js';
+import { compareModpackVersions, discoverModpack, modpackReleaseUrl, type ModpackUpdateStatus, type SignedModpack } from './modpack-channel.js';
+import { updateModpack } from './modpack-update.js';
 import { readModSwitches, setModEnabled } from './mod-switches.js';
 import { createGameExitReporter, watchLockedGame } from './game-process.js';
 import { MANIFEST_PUBLIC_KEY_PEM, RELEASE_MANIFEST_URL } from './release.js';
@@ -37,7 +39,12 @@ const trusted = (event: Electron.IpcMainInvokeEvent) => Boolean(window && event.
 const vanillaPath = () => join(app.getPath('userData'), 'vanilla');
 const vanillaReady = () => existsSync(join(vanillaPath(), '.kayvel-vanilla-ready')) && existsSync(join(vanillaPath(), 'versions', VANILLA_VERSION, `${VANILLA_VERSION}.jar`));
 const neoforgePath = () => instancePath(app.getPath('userData'));
+const updateIncomplete = () => {
+  try { lstatSync(join(neoforgePath(), '.kayvel', 'update-incomplete.json')); return true; }
+  catch (error) { return (error as NodeJS.ErrnoException).code !== 'ENOENT'; }
+};
 const preparedInstanceReady = () => neoForgeReady(neoforgePath())
+  && !updateIncomplete()
   && existsSync(join(neoforgePath(), '.preparation', 'ready.json'))
   && !existsSync(join(neoforgePath(), '.preparation', 'incomplete.json'));
 let preparationProgress: PreparationProgress | null = null;
@@ -92,6 +99,60 @@ app.whenReady().then(async () => {
   await window.loadFile(join(here, '../renderer/index.html'));
 });
 
+let modpackCandidate: SignedModpack | null = null;
+let modpackUpdate: ModpackUpdateStatus = { state: 'unchecked', installedVersion: null, latestVersion: null, message: '' };
+const operationBusy = () => modSwitching || installing || preparingVanilla || preparingNeoForge || gameRunning;
+
+async function checkModpackUpdate(): Promise<ModpackUpdateStatus> {
+  if (operationBusy() || modpackUpdate.state === 'checking') return { ...modpackUpdate };
+  modpackCandidate = null;
+  modpackUpdate = { ...modpackUpdate, state: 'checking', message: '' };
+  try {
+    if (!localProfileReleaseReady || !RELEASE_MANIFEST_URL || !MANIFEST_PUBLIC_KEY_PEM) throw new Error('Канал обновлений не настроен.');
+    if (updateIncomplete()) throw new Error('Предыдущее обновление не завершено. Сохраните резервную копию в .kayvel/updates для восстановления.');
+    const candidate = await discoverModpack(RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM);
+    const installed = await getInstalledManifest(join(neoforgePath(), '.kayvel'), MANIFEST_PUBLIC_KEY_PEM);
+    if (operationBusy()) throw new Error('Другая операция выполняется. Повторите проверку после её завершения.');
+    let state: ModpackUpdateStatus['state'] = 'not-installed';
+    if (installed) {
+      const order = compareModpackVersions(candidate.manifest.buildVersion, installed.manifest.buildVersion);
+      if (order < 0) throw new Error('Сервер предлагает старую сборку. Установленная версия сохранена; откат запрещён.');
+      if (order === 0 && !candidate.bytes.equals(installed.bytes)) throw new Error('Содержимое опубликованной версии изменено. Обновление заблокировано.');
+      state = order > 0 ? 'available' : 'current';
+    }
+    modpackCandidate = candidate;
+    modpackUpdate = { state, installedVersion: installed?.manifest.buildVersion ?? null, latestVersion: candidate.manifest.buildVersion, message: '' };
+  } catch (error) {
+    modpackUpdate = { ...modpackUpdate, state: 'error', message: error instanceof Error ? error.message : 'Не удалось проверить обновления.' };
+  }
+  return { ...modpackUpdate };
+}
+
+ipcMain.handle('kayvel:modpack-check', (event) => {
+  if (!trusted(event)) throw new Error('Untrusted renderer');
+  return checkModpackUpdate();
+});
+ipcMain.handle('kayvel:modpack-update', async (event) => {
+  if (!trusted(event)) return { ok: false, message: 'Недоступно.' };
+  if (operationBusy()) return { ok: false, message: 'Игра или другая операция уже выполняется.' };
+  if (!modpackCandidate || modpackUpdate.state !== 'available') return { ok: false, message: 'Сначала проверьте наличие обновления сборки.' };
+  const candidate = modpackCandidate;
+  modpackCandidate = null;
+  installing = true;
+  modpackUpdate = { ...modpackUpdate, state: 'updating', message: '' };
+  clearPreparation();
+  try {
+    const result = await updateModpack(neoforgePath(), candidate, MANIFEST_PUBLIC_KEY_PEM, reportPreparation);
+    modpackUpdate = { state: 'current', installedVersion: result.version, latestVersion: result.version, message: '' };
+    return { ok: true, message: `Сборка обновлена до ${result.version}. Резервная копия: ${result.backup ?? 'изменений нет'}.` };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : 'Не удалось обновить сборку.';
+    modpackUpdate = { ...modpackUpdate, state: 'error', message };
+    stageProgress(reportPreparation, 'error', message);
+    return { ok: false, message };
+  } finally { installing = false; }
+});
+
 ipcMain.handle('kayvel:status', (event) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
   return {
@@ -108,6 +169,7 @@ ipcMain.handle('kayvel:status', (event) => {
   gameRunning,
   installing,
   modSwitching,
+  modpackUpdate: { ...modpackUpdate },
   preparationProgress
 };
 });
@@ -190,7 +252,14 @@ ipcMain.handle('kayvel:download-and-play', async (event, language: unknown) => {
   try {
     validateNickname(localProfile.read().nickname);
     memorySettings.read();
-    await prepareInstance(app.getPath('userData'), RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM, reportPreparation);
+    let manifestUrl = RELEASE_MANIFEST_URL;
+    let expectedManifest: Buffer | undefined;
+    if (!existsSync(neoforgePath())) {
+      const latest = await discoverModpack(RELEASE_MANIFEST_URL, MANIFEST_PUBLIC_KEY_PEM);
+      manifestUrl = modpackReleaseUrl(RELEASE_MANIFEST_URL, latest.manifest.buildVersion);
+      expectedManifest = latest.bytes;
+    }
+    await prepareInstance(app.getPath('userData'), manifestUrl, MANIFEST_PUBLIC_KEY_PEM, reportPreparation, undefined, expectedManifest);
     preparingNeoForge = false;
     return await playPreparedNeoForge(language);
   } catch (error) {

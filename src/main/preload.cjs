@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('kayvel', {
   status: () => ipcRenderer.invoke('kayvel:status'),
+  checkModpackUpdates: () => ipcRenderer.invoke('kayvel:modpack-check'),
+  updateModpack: () => ipcRenderer.invoke('kayvel:modpack-update'),
   openGameFolder: (language) => ipcRenderer.invoke('kayvel:open-game-folder', language),
   memorySettings: () => ipcRenderer.invoke('kayvel:memory-settings'),
   saveMemoryMb: (memoryMb) => ipcRenderer.invoke('kayvel:memory-save', memoryMb),

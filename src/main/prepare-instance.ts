@@ -27,6 +27,8 @@ async function realDirectory(path: string): Promise<void> {
 
 export async function verifyPreparation(root: string, publicKey: string, report: ReportProgress = () => {}): Promise<void> {
   await realDirectory(root);
+  await realDirectory(join(root, '.kayvel'));
+  if (await exists(join(root, '.kayvel', 'update-incomplete.json'))) throw new Error('Обновление сборки не завершено. Запуск заблокирован; резервная копия сохранена в .kayvel/updates.');
   if (await exists(join(root, incompletePath))) throw new Error('Подготовка не завершена. Файлы сохранены для проверки; автоматическое восстановление отключено.');
   await verifyPreparedFiles(root, publicKey, report);
 }
@@ -76,7 +78,7 @@ export type PreparationDependencies = {
 const defaults: PreparationDependencies = { java: prepareJava, minecraft: prepareMinecraft, neoforge: prepareNeoForge, modpack: installRelease };
 
 export async function prepareInstance(userData: string, manifestUrl: string, publicKey: string, report: ReportProgress,
-    dependencies: PreparationDependencies = defaults): Promise<string> {
+    dependencies: PreparationDependencies = defaults, expectedManifest?: Buffer): Promise<string> {
   if (!manifestUrl || !publicKey) throw new Error('Новый подписанный выпуск сборки ещё не настроен.');
   const root = instancePath(userData);
   const parent = join(userData, 'instances');
@@ -102,7 +104,7 @@ export async function prepareInstance(userData: string, manifestUrl: string, pub
       const java = await dependencies.java(files, userData, report);
       const minecraft = await dependencies.minecraft(files, report);
       await dependencies.neoforge(files, java, minecraft, report);
-      if (dependencies.modpack === installRelease) await install(manifestUrl, publicKey, report);
+      if (dependencies.modpack === installRelease) await install(manifestUrl, publicKey, report, expectedManifest);
       else await dependencies.modpack(root, manifestUrl, publicKey, report);
       stageProgress(report, 'verify', 'Проверка подготовленного экземпляра');
       await files.write(readyPath, JSON.stringify({ schema: 1, instance: INSTANCE_FOLDER, files: [...files.receipts.values()] }));

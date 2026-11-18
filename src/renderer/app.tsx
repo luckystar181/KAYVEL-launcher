@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { PreparationMeter } from './preparation-meter';
+import { ModpackUpdatePanel } from './modpack-update-panel';
+import type { ModpackUpdateStatus } from '../main/modpack-update-status';
 import { watchLauncherStatus } from './launcher-status';
 import type { PreparationProgress } from '../main/preparation-progress';
 import { SkinPreview3D } from './skin-preview-3d';
@@ -8,7 +10,7 @@ import { createRoot } from 'react-dom/client';
 import './style.css';
 
 type MemorySettings = { memoryMb: number; minMemoryMb: number; maxMemoryMb: number; totalMemoryMb: number };
-type Status = { releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; preparationProgress: PreparationProgress | null };
+type Status = { releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; modpackUpdate: ModpackUpdateStatus; preparationProgress: PreparationProgress | null };
 type Result = { ok: boolean; message: string };
 type GameExit = { code: number | null; gamePath: string };
 type LocalProfile = { nickname: string; skin: { model: 'classic' | 'slim'; bytes: number[]; copyPath: string; copyReady: boolean } | null };
@@ -19,6 +21,8 @@ declare global {
   interface Window {
     kayvel: {
       status(): Promise<Status>;
+      checkModpackUpdates(): Promise<ModpackUpdateStatus>;
+      updateModpack(): Promise<Result>;
       openGameFolder(language: 'ru' | 'en'): Promise<Result>;
       memorySettings(): Promise<MemorySettings>;
       saveMemoryMb(memoryMb: number): Promise<MemorySettings>;
@@ -46,7 +50,7 @@ const strings = {
     description: 'Пространство для своей команды. Всё необходимое - в одном месте.',
     install: 'УСТ. МОДПАК', play: 'ИГРАТЬ', settings: 'Настройки',
     preparing: 'Подготовка файлов…', noRelease: 'Сборка ещё не опубликована',
-    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.1 · v3S',
+    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.2 · v3S',
     language: 'Язык', back: 'Назад', gameFolder: 'Папка Minecraft с модами',
     stage: 'СОСТОЯНИЕ ПРОЕКТА', pack: 'Модпак', game: 'Minecraft',
     soon: 'В разработке', waiting: 'Ожидает публикации', available: 'Подписанный релиз настроен',
@@ -62,7 +66,7 @@ const strings = {
     description: 'A place for your team. Everything you need in one place.',
     install: 'INSTALL', play: 'PLAY', settings: 'Settings',
     preparing: 'Preparing files…', noRelease: 'No modpack release has been published',
-    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.1 · v3S',
+    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.2 · v3S',
     language: 'Language', back: 'Back', gameFolder: 'Modded Minecraft folder',
     stage: 'PROJECT STATUS', pack: 'Modpack', game: 'Minecraft',
     soon: 'In development', waiting: 'Awaiting release', available: 'Signed release configured',
@@ -97,6 +101,7 @@ function App() {
   const [modSwitches, setModSwitches] = useState<ModSwitch[] | null>(null);
   const [modMessage, setModMessage] = useState('');
   const [busy, setBusy] = useState(false);
+  const [checkingUpdates, setCheckingUpdates] = useState(false);
   const [message, setMessage] = useState('');
   const [nickname, setNickname] = useState('');
   const [savedNickname, setSavedNickname] = useState('');
@@ -257,6 +262,38 @@ function App() {
     } catch (error) { setModMessage(error instanceof Error ? error.message : 'Не удалось переключить мод.'); }
     finally { setBusy(false); }
   }
+  useEffect(() => {
+    let active = true;
+    setCheckingUpdates(true);
+    void window.kayvel.checkModpackUpdates().then(() => window.kayvel.status()).then(value => {
+      if (active) setStatus(value);
+    }).catch(() => { if (active) setMessage('Не удалось проверить обновления сборки.'); }).finally(() => {
+      if (active) setCheckingUpdates(false);
+    });
+    return () => { active = false; };
+  }, []);
+  async function checkUpdates() {
+    if (checkingUpdates || busy) return;
+    setCheckingUpdates(true);
+    try {
+      await window.kayvel.checkModpackUpdates();
+      setStatus(await window.kayvel.status());
+    } catch { setMessage(lang === 'ru' ? 'Не удалось проверить обновления.' : 'Could not check for updates.'); }
+    finally { setCheckingUpdates(false); }
+  }
+  async function applyUpdate() {
+    if (busy || status?.modpackUpdate.state !== 'available') return;
+    setBusy(true);
+    setProgress(null);
+    setMessage('');
+    try {
+      const result = await window.kayvel.updateModpack();
+      setMessage(result.message);
+      setStatus(await window.kayvel.status());
+      await refreshModSwitches();
+    } catch { setMessage(lang === 'ru' ? 'Обновление прервано. Не удаляйте резервную копию и файлы .kayvel.' : 'Update interrupted. Do not delete the backup or .kayvel files.'); }
+    finally { setBusy(false); }
+  }
   async function downloadAndPlay() {
     if (!status?.releaseConfigured || busy) return;
     setBusy(true);
@@ -310,6 +347,7 @@ function App() {
           <div className="launch-copy"><span className="eyebrow">{t.game}</span><strong>{status?.gameRunning ? t.running : status?.neoforgeReady ? t.neoReady : t.neoWaiting}</strong>{(message || !status?.gameRunning) && <small role="status">{message || (status?.releaseConfigured ? t.downloadReady : t.noRelease)}</small>}<small>{lang === 'ru' ? 'Java → Minecraft → NeoForge → сборка с модами.' : 'Java → Minecraft → NeoForge → modpack.'}</small></div>
           <div className="actions"><button className="play" disabled={!status?.releaseConfigured || busy || status.preparingVanilla || status.preparingNeoForge || status.installing || status.modSwitching || status.gameRunning || !profileReady || !savedNickname || nickname !== savedNickname} onClick={() => void downloadAndPlay()}>{status?.gameRunning ? t.running : busy ? t.preparing : status?.neoforgeReady ? t.play : (lang === 'ru' ? 'Скачать и играть' : 'Download and play')}<span>→</span></button></div>
         </div>
+        <ModpackUpdatePanel status={status?.modpackUpdate ?? null} busy={busy || !status || status.gameRunning || status.preparingNeoForge || status.preparingVanilla || status.installing || status.modSwitching} checking={checkingUpdates} lang={lang} onCheck={() => void checkUpdates()} onUpdate={() => void applyUpdate()} />
         {progress && !status?.gameRunning && <PreparationMeter progress={progress} lang={lang} />}
       </section>}
  {skinOpen && !settings && <div className="game-overlay" onMouseDown={event => { if (event.target === event.currentTarget) setSkinOpen(false); }}><section className="skin-dialog" role="dialog" aria-modal="true" aria-label={t.skinPreview}>

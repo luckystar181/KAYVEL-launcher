@@ -76,7 +76,7 @@ async function matches(path: string, file: ManagedFile): Promise<boolean> {
   return (await lstat(path)).size === file.size && await hashFile(path) === file.sha256;
 }
 
-async function fetchSignedManifest(url: string, key: string): Promise<{ manifest: Manifest; bytes: Buffer; signature: string }> {
+export async function fetchSignedManifest(url: string, key: string): Promise<{ manifest: Manifest; bytes: Buffer; signature: string }> {
   if (!validReleaseUrl(url) || !url.endsWith('.json')) throw new Error('Untrusted manifest URL');
   const bytes = await downloadReleaseBytes(url, 1_000_000);
   const signature = (await downloadReleaseBytes(url + '.sig', 1024)).toString('utf8');
@@ -124,7 +124,7 @@ export async function verifyInstalledRelease(root: string, publicKeyPem: string)
   }
 }
 
-async function fetchFile(file: ManagedFile, part: string, progress: (received: number) => void): Promise<void> {
+export async function fetchFile(file: ManagedFile, part: string, progress: (received: number) => void): Promise<void> {
   let size = 0;
   await withReleaseDownload(file.url, async (response, signal) => {
     const handle = await open(part, 'wx', 0o600);
@@ -156,17 +156,18 @@ async function createDurableFile(path: string, contents: string): Promise<void> 
 }
 
 export async function withInstallationLock<T>(root: string,
-    action: (install: (manifestUrl: string, publicKeyPem: string, report?: ReportProgress) => Promise<string>) => Promise<T>): Promise<T> {
+    action: (install: (manifestUrl: string, publicKeyPem: string, report?: ReportProgress, expectedManifest?: Buffer) => Promise<string>) => Promise<T>): Promise<T> {
   const releaseLock = await acquireGameDirectoryLock(root);
   let active = true;
   let pending: Promise<string> | undefined;
   try {
-    const result = await action((url, key, report = () => {}) => {
+    const result = await action((url, key, report = () => {}, expectedManifest) => {
       if (!active) throw new Error('Блокировка установки уже освобождена.');
       if (pending) throw new Error('В этой блокировке установка сборки уже начата.');
       pending = Promise.resolve().then(async () => {
         stageProgress(report, 'modpack', 'Проверка подписи сборки');
         const signed = await fetchSignedManifest(url, key);
+        if (expectedManifest && !signed.bytes.equals(expectedManifest)) throw new Error('Выпуск изменился после проверки обновлений. Установка остановлена.');
         return installVerifiedRelease(root, signed, key, report);
       });
       void pending.catch(() => {});

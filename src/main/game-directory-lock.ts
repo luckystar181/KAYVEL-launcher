@@ -48,7 +48,8 @@ async function readRecord(lock: string): Promise<LockRecord> {
   return { owner, names, childPids };
 }
 
-async function incomplete(root: string, meta: string): Promise<'install' | 'preparation' | undefined> {
+async function incomplete(root: string, meta: string): Promise<'install' | 'preparation' | 'update' | undefined> {
+  if (await exists(join(meta, 'update-incomplete.json'))) return 'update';
   if (await exists(join(meta, 'install-incomplete.json'))) return 'install';
   const preparation = join(root, '.preparation');
   if (!await exists(preparation)) return undefined;
@@ -150,6 +151,7 @@ export async function acquireGameDirectoryLock(root: string): Promise<GameDirect
   };
   try {
     const unfinished = await incomplete(root, meta);
+    if (unfinished === 'update') throw new Error('Обновление сборки не завершено. Запуск заблокирован; сохраните .kayvel/updates и update-incomplete.json для восстановления.');
     if (unfinished === 'preparation') throw new Error('Подготовка не завершена. Файлы сохранены для проверки; автоматическое восстановление отключено.');
     if (unfinished) throw new Error('Обнаружена незавершённая установка модпака. Не запускайте игру и не удаляйте файлы .kayvel до проверки.');
   } catch (error) {

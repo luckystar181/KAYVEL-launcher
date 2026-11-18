@@ -32,7 +32,7 @@ export async function readModSwitches(root: string, publicKeyPem: string): Promi
   if (!await safeExistingDirectory(root) || !await safeExistingDirectory(join(root, '.kayvel'))) {
     return unavailable('Нужна новая установка подписанного модпака с поддержкой переключателей.');
   }
-  if (await preparationIncomplete(root) || await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
+  if (await preparationIncomplete(root) || await entry(join(root, '.kayvel', 'update-incomplete.json')) || await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
     return unavailable('Установка не завершена; сначала проверьте состояние файлов вручную.');
   }
   const installed = await getInstalledManifest(join(root, '.kayvel'), publicKeyPem);
@@ -49,7 +49,7 @@ export async function readModSwitches(root: string, publicKeyPem: string): Promi
 
 export async function assertModSwitchProvenance(root: string, publicKeyPem: string, expectedBytes: Buffer): Promise<void> {
   if (!await safeExistingDirectory(root) || !await safeExistingDirectory(join(root, '.kayvel')) || await preparationIncomplete(root) ||
-      await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
+      await entry(join(root, '.kayvel', 'update-incomplete.json')) || await entry(join(root, '.kayvel', 'install-incomplete.json'))) {
     throw new Error('Переключение недоступно: состояние установки изменилось.');
   }
   const installed = await getInstalledManifest(join(root, '.kayvel'), publicKeyPem);
