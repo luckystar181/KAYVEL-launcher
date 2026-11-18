@@ -52,13 +52,14 @@ const strings = {
     description: 'Пространство для своей команды. Всё необходимое - в одном месте.',
     install: 'УСТ. МОДПАК', play: 'ИГРАТЬ', settings: 'Настройки',
     preparing: 'Подготовка файлов…', noRelease: 'Сборка ещё не опубликована',
-    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.4 · v3S',
+    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.6 · v3S',
     language: 'Язык', back: 'Назад', gameFolder: 'Папка Minecraft с модами',
     stage: 'СОСТОЯНИЕ ПРОЕКТА', pack: 'Модпак', game: 'Minecraft',
     soon: 'В разработке', waiting: 'Ожидает публикации', available: 'Подписанный релиз настроен',
     pathHint: 'Отдельный новый экземпляр. Прежние установки, моды и миры автоматически не переносятся.',
     vanilla: 'Ванильная 1.21.1', vanillaInstall: '1.21.1 НЕДОСТУПНА', vanillaPlay: 'ЗАПУСТИТЬ ТЕСТ',
-    nickname: 'Ник игрока',
+    profile: 'Профиль', nickname: 'Ник, который вам установили на Discord-сервере',
+    ffmpegWarning: 'Не устанавливайте FFmpeg',
     vanillaReady: 'Установлено', vanillaWaiting: 'Не установлена', running: 'Игра запущена',
     noJava: 'Java 21 не найдена; автоматическая загрузка отключена', preparationBlocked: 'Подготовка Minecraft и NeoForge временно отключена: загрузчики ещё не проверены на сохранность файлов и отсутствие повторов.', neoInstall: 'NEOFORGE НЕДОСТУПЕН', neoPlay: 'ЗАПУСТИТЬ NEOFORGE', neoReady: 'Установлено', neoWaiting: 'Не установлен', neoHint: 'Модпак устанавливается отдельно. Локальный запуск не подтверждает допуск на сервер.',
     gameSection: 'Мини-игра', gameTitle: 'Ударь Паспартама', gameHint: 'Поймай Паспартама за 30 секунд: нажимай на появляющуюся цель и побей свой рекорд.', gameCell: 'Паспартам', gameScore: 'СЧЁТ', gameBest: 'РЕКОРД', gameSoon: 'Скоро', gamePlay: 'ИГРАТЬ', skinPreview: 'Предпросмотр скина', chooseSkin: 'Загрузить PNG', skinPreviewHint: 'PNG 64×64 или 64×32, до 1 MiB.'
@@ -68,13 +69,14 @@ const strings = {
     description: 'A place for your team. Everything you need in one place.',
     install: 'INSTALL', play: 'PLAY', settings: 'Settings',
     preparing: 'Preparing files…', noRelease: 'No modpack release has been published',
-    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.4 · v3S',
+    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.6 · v3S',
     language: 'Language', back: 'Back', gameFolder: 'Modded Minecraft folder',
     stage: 'PROJECT STATUS', pack: 'Modpack', game: 'Minecraft',
     soon: 'In development', waiting: 'Awaiting release', available: 'Signed release configured',
     pathHint: 'A separate new instance. Existing installations, mods and worlds are not migrated automatically.',
     vanilla: 'Vanilla 1.21.1', vanillaInstall: '1.21.1 UNAVAILABLE', vanillaPlay: 'LAUNCH TEST',
-    nickname: 'Player name',
+    profile: 'Profile', nickname: 'Nickname assigned to you on the Discord server',
+    ffmpegWarning: 'Do not install FFmpeg',
     vanillaReady: 'Installed', vanillaWaiting: 'Not installed', running: 'Game running',
     noJava: 'Java 21 was not found; automatic download is disabled', preparationBlocked: 'Minecraft and NeoForge preparation is temporarily disabled: the downloaders have not yet been verified to preserve existing files and avoid retries.', neoInstall: 'NEOFORGE UNAVAILABLE', neoPlay: 'LAUNCH NEOFORGE', neoReady: 'Installed', neoWaiting: 'Not installed', neoHint: 'The modpack is installed separately. Local launch does not grant server access.',
     gameSection: 'Mini-game', gameTitle: 'Hit Passepartout', gameHint: 'Catch Passepartout in 30 seconds: tap the target and beat your best score.', gameCell: 'Passepartout', gameScore: 'SCORE', gameBest: 'BEST', gameSoon: 'Coming soon', gamePlay: 'PLAY', skinPreview: 'Skin preview', chooseSkin: 'Upload PNG', skinPreviewHint: 'PNG 64×64 or 64×32, up to 1 MiB.'
@@ -343,8 +345,9 @@ function App() {
       </section>
       <button className="text-button" onClick={toggleSettings}>← {t.back}</button></section> :
       <section className="hero">
+        <aside className="ffmpeg-warning"><span aria-hidden="true">⚠</span><strong>{t.ffmpegWarning}</strong></aside>
         <section className="profile-strip">
-          <div className="profile-intro"><SkinHead file={skinHeadFile} label={lang === 'ru' ? 'Голова выбранного скина' : 'Selected skin head'} /><div><span className="eyebrow">{t.nickname}</span><strong>{savedNickname || (lang === 'ru' ? 'Укажите ник' : 'Choose a name')}</strong></div></div>
+          <div className="profile-intro"><SkinHead file={skinHeadFile} label={lang === 'ru' ? 'Голова выбранного скина' : 'Selected skin head'} /><div><span className="eyebrow">{t.profile}</span><strong>{savedNickname || (lang === 'ru' ? 'Укажите ник' : 'Choose a name')}</strong></div></div>
           <div className="local-test"><label htmlFor="nickname">{t.nickname}</label><input id="nickname" value={nickname} disabled={!profileReady || busy} maxLength={16} placeholder="Player_123" autoComplete="off" onChange={event => setNickname(event.target.value)} /><button disabled={!profileReady || busy || nickname === savedNickname || !/^[A-Za-z0-9_]{3,16}$/.test(nickname)} onClick={() => void saveNickname()}>{lang === 'ru' ? 'Сохранить ник' : 'Save name'}</button></div>
         </section>
         <div className="home-grid">
