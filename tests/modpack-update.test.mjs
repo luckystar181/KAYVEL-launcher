@@ -44,7 +44,7 @@ test('update downloads only differences, backs up managed changes, and preserves
   await absent(root, '.kayvel/update-incomplete.json');
   assert.equal((await getInstalledManifest(join(root, '.kayvel'), publicKey)).manifest.buildVersion, result.version);
   await verifyPreparation(root, publicKey);
-  await prepareInstance(userData, pinnedUrl, publicKey, () => {});
+  await prepareInstance(userData, pinnedUrl, publicKey, () => {}, { ffmpeg: async () => {} });
   assert.equal(calls.length, 2, 'an already updated instance must not download or downgrade to the pin');
 });
 

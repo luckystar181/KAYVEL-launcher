@@ -22,8 +22,8 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   ipcRenderer.invoke = (...args) => { calls.push(args); return Promise.resolve({}); };
   const api = await loadPreload(ipcRenderer);
   assert.deepEqual(Object.keys(api).sort(), [
-    'cancelDownload', 'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
-    'playNeoForge', 'playVanilla', 'retryDownload', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'updateModpack', 'window'
+    'cancelDownload', 'checkLauncherUpdates', 'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
+    'playNeoForge', 'playVanilla', 'retryDownload', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'updateLauncher', 'updateModpack', 'window'
   ]);
   await api.localProfile();
   await api.saveLocalNickname('LocalPlayer');
@@ -34,10 +34,12 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   await api.openGameFolder('ru');
   await api.checkModpackUpdates({ url: 'https://untrusted.invalid' }, 'C:\\untrusted');
   await api.updateModpack({ signature: 'untrusted', bytes: 'untrusted' }, 'C:\\untrusted');
+  await api.checkLauncherUpdates({ url: 'https://untrusted.invalid' });
+  await api.updateLauncher('en', { signature: 'untrusted', bytes: 'untrusted' });
   assert.deepEqual(calls, [
     ['kayvel:local-profile'], ['kayvel:local-nickname-save', 'LocalPlayer'], ['kayvel:local-skin-save', png, 'slim'],
     ['kayvel:memory-settings'], ['kayvel:memory-save', 8192], ['kayvel:open-game-folder', 'ru'],
-    ['kayvel:modpack-check'], ['kayvel:modpack-update']
+    ['kayvel:modpack-check'], ['kayvel:modpack-update'], ['kayvel:launcher-check'], ['kayvel:launcher-update', 'en']
   ]);
 });
 

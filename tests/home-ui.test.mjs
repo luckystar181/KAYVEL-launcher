@@ -5,11 +5,11 @@ import { readFile } from 'node:fs/promises';
 const source = await readFile(new URL('../src/renderer/app.tsx', import.meta.url), 'utf8');
 const style = await readFile(new URL('../src/renderer/style.css', import.meta.url), 'utf8');
 
-test('home menu shows the localized FFmpeg warning before the profile and launch controls', () => {
-  assert.match(source, /ffmpegWarning: 'Не устанавливайте FFmpeg'/);
-  assert.match(source, /ffmpegWarning: 'Do not install FFmpeg'/);
-  assert.match(source, /<section className="hero">\s*<aside className="ffmpeg-warning"><span aria-hidden="true">⚠<\/span><strong>\{t\.ffmpegWarning\}<\/strong><\/aside>\s*<section className="profile-strip">/);
-  assert.match(style, /\.ffmpeg-warning\{[^}]*flex:none;[^}]*border:1px solid/);
+test('home menu no longer warns against FFmpeg and includes launcher update controls', () => {
+  assert.doesNotMatch(source, /ffmpegWarning|ffmpeg-warning|Не устанавливайте FFmpeg|Do not install FFmpeg/);
+  assert.doesNotMatch(style, /ffmpeg-warning/);
+  assert.match(source, /<section className="hero">\s*<section className="profile-strip">/);
+  assert.match(source, /<LauncherUpdatePanel/);
 });
 
 test('nickname field asks for the Discord-assigned name while the profile heading stays short', () => {
@@ -31,6 +31,19 @@ test('home content keeps usable dark scrollbars during first download in small w
   assert.match(style, /::-webkit-scrollbar-thumb\{background:#76505f;/);
   assert.match(style, /\.hero\{overflow-y:auto\}/);
   assert.doesNotMatch(style, /\.hero(?:::-webkit-scrollbar)?\{[^}]*(?:overflow(?:-y)?:hidden|scrollbar-width:none|display:none)/);
+});
+
+test('home emphasizes the skin and keeps update details collapsed without hiding progress', () => {
+  assert.match(source, /<details className=\{`home-updates/);
+  const details = source.slice(source.indexOf('<details className={`home-updates'), source.indexOf('</details>'));
+  assert.doesNotMatch(details, /\bopen[= >]/);
+  assert.match(details, /<summary>/);
+  assert.match(details, /<ModpackUpdatePanel/);
+  assert.match(details, /<LauncherUpdatePanel/);
+  assert.doesNotMatch(details, /PreparationMeter|download-controls/);
+  assert.match(source, /updateAvailable = status\?\.modpackUpdate.state === 'available' \|\| status\?\.launcherUpdate.state === 'available'/);
+  assert.match(style, /\.home-skin \.skin-stage\{min-height:228px/);
+  assert.doesNotMatch(source, /brand-diamond|Java → Minecraft → NeoForge/);
 });
 
 test('both footer translations match the packaged launcher version', async () => {

@@ -2,6 +2,8 @@ const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('kayvel', {
   status: () => ipcRenderer.invoke('kayvel:status'),
+  checkLauncherUpdates: () => ipcRenderer.invoke('kayvel:launcher-check'),
+  updateLauncher: (language) => ipcRenderer.invoke('kayvel:launcher-update', language),
   checkModpackUpdates: () => ipcRenderer.invoke('kayvel:modpack-check'),
   updateModpack: () => ipcRenderer.invoke('kayvel:modpack-update'),
   openGameFolder: (language) => ipcRenderer.invoke('kayvel:open-game-folder', language),

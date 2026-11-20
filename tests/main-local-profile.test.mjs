@@ -12,6 +12,7 @@ import { EventEmitter } from 'node:events';
 import { createGameExitReporter, watchLockedGame } from '../dist/main/game-process.js';
 import { MANIFEST_PUBLIC_KEY_PEM, RELEASE_MANIFEST_URL } from '../dist/main/release.js';
 import { createPublicKey } from 'node:crypto';
+import { compareLauncherVersions } from '../dist/main/launcher-update.js';
 import { compareModpackVersions, modpackReleaseUrl } from '../dist/main/modpack-channel.js';
 
 const missingEntry = () => { throw Object.assign(new Error('missing'), { code: 'ENOENT' }); };
@@ -37,7 +38,7 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
     './download-session.js': { ...downloadSession, configureDownloadRequest() {} },
     electron: {
       shell: { openPath },
-      app: { getPath: () => root, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
+      app: { getVersion: () => '0.2.7', getPath: () => root, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
       BrowserWindow: class {
         webContents = sender;
         on() {}
@@ -80,6 +81,8 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
     './game-skin.js': { applyLocalSkin: () => assert.fail('Unexpected skin application') },
     './game-best.js': { createGameBestStore: () => ({ read: () => 0, save: score => score }) },
     './prepare-instance.js': { instancePath: path => join(path, 'instances', 'kayvel-1.21.1-neoforge-21.1.252-v3S') },
+    './prepare-ffmpeg.js': { prepareFFmpeg: async () => {} },
+    './launcher-update.js': { compareLauncherVersions: (a, b) => a.localeCompare(b), discoverLauncher: async () => { throw new Error('No live launcher channel in VM'); }, stageLauncherUpdate: () => assert.fail('Unexpected launcher installer') },
     './preparation-progress.js': { stageProgress },
     ...overrides
   };
@@ -102,11 +105,104 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
   return { handlers, event, sent, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) };
 }
 
+function launcherModules({ version = '0.2.8', discover, stage } = {}) {
+  const pack = { manifest: { version }, bytes: Buffer.from('fictional signed metadata'), signature: 'fictional signature' };
+  return { './launcher-update.js': { compareLauncherVersions, discoverLauncher: discover ?? (async () => pack), stageLauncherUpdate: stage ?? (() => assert.fail('Unexpected installer download')) } };
+}
+for (const [version, state] of [['0.2.8', 'available'], ['0.2.7', 'current'], ['0.2.6', 'error']]) {
+  test(`launcher discovery classifies ${version} as ${state} without downloading or asking confirmation`, async () => {
+    const main = await isolatedMain({ overrides: launcherModules({ version }) });
+    await assert.rejects(main.handlers.get('kayvel:launcher-check')({ sender: {} }), /Untrusted/);
+    assert.equal((await main.invoke('kayvel:launcher-check', { url: 'https://untrusted.invalid' })).state, state);
+    assert.equal(main.invoke('kayvel:status').launcherUpdate.state, state);
+    assert.equal(main.invoke('kayvel:status').installing, false);
+  });
+}
+test('missing launcher channel clears a former candidate and never authorizes an installer', async () => {
+  let checks = 0;
+  const main = await isolatedMain({ overrides: launcherModules({ discover: async () => ++checks === 1 ? { manifest: { version: '0.2.8' } } : null }) });
+  assert.equal((await main.invoke('kayvel:launcher-check')).state, 'available');
+  const result = await main.invoke('kayvel:launcher-check');
+  assert.equal(result.state, 'unavailable');
+  assert.equal(result.latestVersion, null);
+  assert.equal(result.message, '');
+  assert.equal((await main.invoke('kayvel:launcher-update', 'ru')).ok, false);
+  assert.equal(main.invoke('kayvel:status').installing, false);
+});
+test('launcher install requires private candidate, trusted sender and native confirmation with cancel as default', async () => {
+  let dialogs = 0;
+  const main = await isolatedMain({ overrides: launcherModules(), confirm: async (_window, options) => {
+    dialogs++; assert.equal(options.defaultId, 1); assert.equal(options.cancelId, 1);
+    assert.match(options.message, /0.2.8/); return { response: 1 };
+  } });
+  assert.equal((await main.invoke('kayvel:launcher-update', 'en', { url: 'https://untrusted.invalid' })).ok, false);
+  assert.equal(dialogs, 0);
+  await main.invoke('kayvel:launcher-check');
+  assert.equal((await main.handlers.get('kayvel:launcher-update')({ sender: {} }, 'en')).ok, false);
+  assert.equal((await main.invoke('kayvel:launcher-update', 'en')).ok, false);
+  assert.equal(dialogs, 1);
+  assert.equal(main.invoke('kayvel:status').launcherUpdate.state, 'available');
+  assert.equal(main.invoke('kayvel:status').installing, false);
+});
+test('launcher install opens only the staged installer and blocks competing operations during native confirmation', async () => {
+  const answer = deferred();
+  const opened = [];
+  let downloads = 0;
+  const main = await isolatedMain({ activateRelease: true, confirm: () => answer.promise, openPath: async path => { opened.push(path); return ''; },
+    overrides: launcherModules({ stage: async (root, pack, key, current) => {
+      downloads++; assert.equal(current, '0.2.7'); assert.equal(pack.manifest.version, '0.2.8'); assert.equal(key, 'fictional-public-key');
+      assert.equal(root, join('fictional-profile', 'launcher')); return 'fictional-verified-installer.exe';
+    } }) });
+  await main.invoke('kayvel:launcher-check');
+  const pending = main.invoke('kayvel:launcher-update', 'ru', { url: 'https://untrusted.invalid' });
+  assert.equal(downloads, 0);
+  assert.equal(main.invoke('kayvel:status').installing, true);
+  for (const channel of ['kayvel:launcher-update', 'kayvel:download-and-play', 'kayvel:retry-download', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:mod-switch-set', 'kayvel:modpack-update']) assert.equal((await main.invoke(channel, 'ru')).ok, false);
+  assert.equal((await main.invoke('kayvel:launcher-check')).state, 'available');
+  answer.resolve({ response: 0 });
+  assert.equal((await pending).ok, true);
+  assert.equal(downloads, 1);
+  assert.deepEqual(opened, ['fictional-verified-installer.exe']);
+  assert.equal(main.invoke('kayvel:status').launcherUpdate.state, 'installer-open');
+  assert.equal(main.invoke('kayvel:status').installing, false);
+  assert.equal((await main.invoke('kayvel:launcher-update', 'ru')).ok, false);
+});
+for (const scenario of ['cancel', 'bad-hash', 'shell-failure']) {
+  test(`launcher install fails closed and clears busy state: ${scenario}`, async () => {
+    const staged = deferred();
+    let opens = 0;
+    let signal;
+    const main = await isolatedMain({ confirm: async () => ({ response: 0 }), openPath: async () => { opens++; return 'fixture shell error'; },
+      overrides: launcherModules({ stage: async () => {
+        signal = downloadSession.downloadSignal();
+        await staged.promise;
+        if (scenario === 'bad-hash') throw new Error('fixture bad installer hash');
+        return 'fictional-staged-installer.exe';
+      } }) });
+    await main.invoke('kayvel:launcher-check');
+    const pending = main.invoke('kayvel:launcher-update', 'ru');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(main.invoke('kayvel:status').downloadActive, true);
+    if (scenario === 'cancel') {
+      assert.equal(main.invoke('kayvel:cancel-download').ok, true);
+      assert.equal(signal.aborted, true);
+      assert.equal(main.invoke('kayvel:status').installing, true);
+    }
+    staged.resolve();
+    assert.equal((await pending).ok, false);
+    assert.equal(opens, scenario === 'shell-failure' ? 1 : 0);
+    const status = main.invoke('kayvel:status');
+    assert.equal(status.installing, false); assert.equal(status.downloadActive, false);
+    assert.equal(status.launcherUpdate.state, 'error');
+    assert.equal((await main.invoke('kayvel:launcher-update', 'ru')).ok, false);
+  });
+}
+
 test('main registers local-profile operations but no KAYVEL account or remote skin operations', async () => {
   const main = await isolatedMain();
   assert.deepEqual([...main.handlers.keys()].sort(), [
     'kayvel:cancel-download', 'kayvel:download-and-play', 'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
-    'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:memory-save', 'kayvel:memory-settings',
+    'kayvel:launcher-check', 'kayvel:launcher-update', 'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:memory-save', 'kayvel:memory-settings',
     'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:modpack-check', 'kayvel:modpack-update', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:retry-download', 'kayvel:status'
   ]);
   const status = main.invoke('kayvel:status');
@@ -363,6 +459,32 @@ for (const state of ['missing-record', 'incomplete', 'recorded']) {
     } });
     assert.equal(main.invoke('kayvel:status').neoforgeReady, state === 'recorded');
     if (state !== 'recorded') assert.equal((await main.invoke('kayvel:play-neoforge', 'ru')).ok, false);
+  });
+}
+
+for (const scenario of ['failure', 'cancel']) {
+  test(`direct launch installs FFmpeg under the game lock and cannot launch after ${scenario}`, async () => {
+    const stopped = deferred();
+    const order = [];
+    const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: {
+      ...preparedModules(async () => assert.fail('No core preparation expected'), { verifyPreparation: async () => order.push('verify') }),
+      './installer.js': { acquireGameDirectoryLock: async () => { order.push('lock'); return async () => { order.push('unlock'); }; } },
+      './prepare-ffmpeg.js': { prepareFFmpeg: async () => {
+        order.push('ffmpeg'); await stopped.promise;
+        if (scenario === 'failure') throw new Error('fixture FFmpeg failure');
+      } }
+    } });
+    const pending = main.invoke('kayvel:play-neoforge', 'ru');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(order, ['lock', 'verify', 'ffmpeg']);
+    assert.equal(main.invoke('kayvel:status').downloadActive, true);
+    assert.equal(main.invoke('kayvel:status').preparingNeoForge, true);
+    if (scenario === 'cancel') assert.equal(main.invoke('kayvel:cancel-download').ok, true);
+    stopped.resolve();
+    assert.equal((await pending).ok, false);
+    assert.deepEqual(order, ['lock', 'verify', 'ffmpeg', 'unlock']);
+    const status = main.invoke('kayvel:status');
+    assert.equal(status.downloadActive, false); assert.equal(status.preparingNeoForge, false); assert.equal(status.gameRunning, false);
   });
 }
 

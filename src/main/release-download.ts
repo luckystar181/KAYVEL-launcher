@@ -53,6 +53,13 @@ function transportReason(error: unknown): [string, string] {
   return ['NETWORK_ERROR', 'Не удалось получить данные от сервера. Проверьте соединение и доступ к этому серверу.'];
 }
 
+export class ReleaseHttpError extends Error {
+  constructor(readonly status: number, readonly hostname: string) {
+    super(`Download failed with HTTP status ${status} (${hostname})`);
+    this.name = 'ReleaseHttpError';
+  }
+}
+
 class ResponseTransportError extends Error {}
 
 class DownloadTransportError extends Error {
@@ -155,7 +162,7 @@ export async function withTrustedDownload<T>(url: string, validateUrl: (value: s
       activity();
       if (response.redirected) throw new Error('Unexpected automatic download redirect');
       if (!redirectStatuses.has(response.status)) {
-        if (response.status !== 200) throw new Error(`Download failed with HTTP status ${response.status} (${new URL(current).hostname})`);
+        if (response.status !== 200) throw new ReleaseHttpError(response.status, new URL(current).hostname);
         const result = await consume(response, signal);
         signal.throwIfAborted();
         return result;

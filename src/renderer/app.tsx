@@ -1,5 +1,7 @@
 import React, { useEffect, useState } from 'react';
 import { PreparationMeter } from './preparation-meter';
+import { LauncherUpdatePanel } from './launcher-update-panel';
+import type { LauncherUpdateStatus } from '../main/launcher-update-status';
 import { ModpackUpdatePanel } from './modpack-update-panel';
 import type { ModpackUpdateStatus } from '../main/modpack-update-status';
 import { watchLauncherStatus } from './launcher-status';
@@ -10,7 +12,7 @@ import { createRoot } from 'react-dom/client';
 import './style.css';
 
 type MemorySettings = { memoryMb: number; minMemoryMb: number; maxMemoryMb: number; totalMemoryMb: number };
-type Status = { downloadActive: boolean; downloadCancelling: boolean; preparationIncomplete: boolean; releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; modpackUpdate: ModpackUpdateStatus; preparationProgress: PreparationProgress | null };
+type Status = { downloadActive: boolean; downloadCancelling: boolean; preparationIncomplete: boolean; releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; launcherUpdate: LauncherUpdateStatus; modpackUpdate: ModpackUpdateStatus; preparationProgress: PreparationProgress | null };
 type Result = { ok: boolean; message: string };
 type GameExit = { code: number | null; gamePath: string };
 type LocalProfile = { nickname: string; skin: { model: 'classic' | 'slim'; bytes: number[]; copyPath: string; copyReady: boolean } | null };
@@ -21,6 +23,8 @@ declare global {
   interface Window {
     kayvel: {
       status(): Promise<Status>;
+      checkLauncherUpdates(): Promise<LauncherUpdateStatus>;
+      updateLauncher(language: 'ru' | 'en'): Promise<Result>;
       checkModpackUpdates(): Promise<ModpackUpdateStatus>;
       updateModpack(): Promise<Result>;
       openGameFolder(language: 'ru' | 'en'): Promise<Result>;
@@ -52,14 +56,13 @@ const strings = {
     description: 'Пространство для своей команды. Всё необходимое - в одном месте.',
     install: 'УСТ. МОДПАК', play: 'ИГРАТЬ', settings: 'Настройки',
     preparing: 'Подготовка файлов…', noRelease: 'Сборка ещё не опубликована',
-    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.6 · v3S',
+    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.7 · v3S',
     language: 'Язык', back: 'Назад', gameFolder: 'Папка Minecraft с модами',
     stage: 'СОСТОЯНИЕ ПРОЕКТА', pack: 'Модпак', game: 'Minecraft',
     soon: 'В разработке', waiting: 'Ожидает публикации', available: 'Подписанный релиз настроен',
     pathHint: 'Отдельный новый экземпляр. Прежние установки, моды и миры автоматически не переносятся.',
     vanilla: 'Ванильная 1.21.1', vanillaInstall: '1.21.1 НЕДОСТУПНА', vanillaPlay: 'ЗАПУСТИТЬ ТЕСТ',
     profile: 'Профиль', nickname: 'Ник, который вам установили на Discord-сервере',
-    ffmpegWarning: 'Не устанавливайте FFmpeg',
     vanillaReady: 'Установлено', vanillaWaiting: 'Не установлена', running: 'Игра запущена',
     noJava: 'Java 21 не найдена; автоматическая загрузка отключена', preparationBlocked: 'Подготовка Minecraft и NeoForge временно отключена: загрузчики ещё не проверены на сохранность файлов и отсутствие повторов.', neoInstall: 'NEOFORGE НЕДОСТУПЕН', neoPlay: 'ЗАПУСТИТЬ NEOFORGE', neoReady: 'Установлено', neoWaiting: 'Не установлен', neoHint: 'Модпак устанавливается отдельно. Локальный запуск не подтверждает допуск на сервер.',
     gameSection: 'Мини-игра', gameTitle: 'Ударь Паспартама', gameHint: 'Поймай Паспартама за 30 секунд: нажимай на появляющуюся цель и побей свой рекорд.', gameCell: 'Паспартам', gameScore: 'СЧЁТ', gameBest: 'РЕКОРД', gameSoon: 'Скоро', gamePlay: 'ИГРАТЬ', skinPreview: 'Предпросмотр скина', chooseSkin: 'Загрузить PNG', skinPreviewHint: 'PNG 64×64 или 64×32, до 1 MiB.'
@@ -69,14 +72,13 @@ const strings = {
     description: 'A place for your team. Everything you need in one place.',
     install: 'INSTALL', play: 'PLAY', settings: 'Settings',
     preparing: 'Preparing files…', noRelease: 'No modpack release has been published',
-    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.6 · v3S',
+    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.7 · v3S',
     language: 'Language', back: 'Back', gameFolder: 'Modded Minecraft folder',
     stage: 'PROJECT STATUS', pack: 'Modpack', game: 'Minecraft',
     soon: 'In development', waiting: 'Awaiting release', available: 'Signed release configured',
     pathHint: 'A separate new instance. Existing installations, mods and worlds are not migrated automatically.',
     vanilla: 'Vanilla 1.21.1', vanillaInstall: '1.21.1 UNAVAILABLE', vanillaPlay: 'LAUNCH TEST',
     profile: 'Profile', nickname: 'Nickname assigned to you on the Discord server',
-    ffmpegWarning: 'Do not install FFmpeg',
     vanillaReady: 'Installed', vanillaWaiting: 'Not installed', running: 'Game running',
     noJava: 'Java 21 was not found; automatic download is disabled', preparationBlocked: 'Minecraft and NeoForge preparation is temporarily disabled: the downloaders have not yet been verified to preserve existing files and avoid retries.', neoInstall: 'NEOFORGE UNAVAILABLE', neoPlay: 'LAUNCH NEOFORGE', neoReady: 'Installed', neoWaiting: 'Not installed', neoHint: 'The modpack is installed separately. Local launch does not grant server access.',
     gameSection: 'Mini-game', gameTitle: 'Hit Passepartout', gameHint: 'Catch Passepartout in 30 seconds: tap the target and beat your best score.', gameCell: 'Passepartout', gameScore: 'SCORE', gameBest: 'BEST', gameSoon: 'Coming soon', gamePlay: 'PLAY', skinPreview: 'Skin preview', chooseSkin: 'Upload PNG', skinPreviewHint: 'PNG 64×64 or 64×32, up to 1 MiB.'
@@ -269,7 +271,7 @@ function App() {
   useEffect(() => {
     let active = true;
     setCheckingUpdates(true);
-    void window.kayvel.checkModpackUpdates().then(() => window.kayvel.status()).then(value => {
+    void Promise.allSettled([window.kayvel.checkModpackUpdates(), window.kayvel.checkLauncherUpdates()]).then(() => window.kayvel.status()).then(value => {
       if (active) setStatus(value);
     }).catch(() => { if (active) setMessage('Не удалось проверить обновления сборки.'); }).finally(() => {
       if (active) setCheckingUpdates(false);
@@ -284,6 +286,20 @@ function App() {
       setStatus(await window.kayvel.status());
     } catch { setMessage(lang === 'ru' ? 'Не удалось проверить обновления.' : 'Could not check for updates.'); }
     finally { setCheckingUpdates(false); }
+  }
+  async function checkLauncherUpdates() {
+    if (busy || checkingUpdates) return;
+    setCheckingUpdates(true);
+    try { await window.kayvel.checkLauncherUpdates(); setStatus(await window.kayvel.status()); }
+    catch { setMessage(lang === 'ru' ? 'Не удалось проверить лаунчер.' : 'Could not check launcher updates.'); }
+    finally { setCheckingUpdates(false); }
+  }
+  async function applyLauncherUpdate() {
+    if (busy || status?.launcherUpdate.state !== 'available') return;
+    setBusy(true);
+    try { const result = await window.kayvel.updateLauncher(lang); setMessage(result.message); setStatus(await window.kayvel.status()); }
+    catch { setMessage(lang === 'ru' ? 'Не удалось обновить лаунчер.' : 'Could not update launcher.'); }
+    finally { setBusy(false); }
   }
   async function applyUpdate() {
     if (busy || status?.modpackUpdate.state !== 'available') return;
@@ -318,6 +334,10 @@ function App() {
     } catch { setMessage(lang === 'ru' ? 'Операция прервана. Проверьте сохранённые файлы; автоматического повтора нет.' : 'Operation interrupted. Inspect the saved files; no automatic retry was made.'); }
     finally { setBusy(false); }
   }
+  const updateAvailable = status?.modpackUpdate.state === 'available' || status?.launcherUpdate.state === 'available';
+  const updateChecking = checkingUpdates || status?.modpackUpdate.state === 'checking' || status?.launcherUpdate.state === 'checking';
+  const updateFailed = status?.modpackUpdate.state === 'error' || status?.launcherUpdate.state === 'error';
+  const updateSummary = updateAvailable ? (lang === 'ru' ? 'Доступно обновление' : 'Update available') : updateChecking ? (lang === 'ru' ? 'Проверяем…' : 'Checking…') : updateFailed ? (lang === 'ru' ? 'Не удалось проверить' : 'Could not check') : (lang === 'ru' ? 'Сборка и лаунчер' : 'Modpack and launcher');
   return <div className="shell">
     <header className="titlebar">
       <span className="brand-mini">K<span>◆</span>YVEL</span>
@@ -345,23 +365,27 @@ function App() {
       </section>
       <button className="text-button" onClick={toggleSettings}>← {t.back}</button></section> :
       <section className="hero">
-        <aside className="ffmpeg-warning"><span aria-hidden="true">⚠</span><strong>{t.ffmpegWarning}</strong></aside>
         <section className="profile-strip">
           <div className="profile-intro"><SkinHead file={skinHeadFile} label={lang === 'ru' ? 'Голова выбранного скина' : 'Selected skin head'} /><div><span className="eyebrow">{t.profile}</span><strong>{savedNickname || (lang === 'ru' ? 'Укажите ник' : 'Choose a name')}</strong></div></div>
           <div className="local-test"><label htmlFor="nickname">{t.nickname}</label><input id="nickname" value={nickname} disabled={!profileReady || busy} maxLength={16} placeholder="Player_123" autoComplete="off" onChange={event => setNickname(event.target.value)} /><button disabled={!profileReady || busy || nickname === savedNickname || !/^[A-Za-z0-9_]{3,16}$/.test(nickname)} onClick={() => void saveNickname()}>{lang === 'ru' ? 'Сохранить ник' : 'Save name'}</button></div>
         </section>
         <div className="home-grid">
           <section className="identity-panel">
-            <span className="eyebrow">MINECRAFT 1.21.1 / NEOFORGE</span>
-            <div className="home-showcase"><div className="brand-display"><span className="brand-diamond">◆</span><h1>KAYVEL</h1></div><section className="home-skin" aria-label={lang === 'ru' ? 'Скин на главном экране' : 'Skin on home screen'}><div className="home-skin-heading"><span className="eyebrow">{lang === 'ru' ? 'ПРЕДПРОСМОТР СКИНА' : 'SKIN PREVIEW'}</span><button type="button" onClick={() => { setSkinOpen(true); setGameOpen(false); }}>{lang === 'ru' ? 'Выбрать скин' : 'Choose skin'}</button></div>{!skinOpen && <SkinPreview3D file={skinFile ?? skinHeadFile} model={skinModel} lang={lang} />}</section></div>
+            <div className="home-showcase"><div className="brand-display"><span className="eyebrow">MINECRAFT JAVA EDITION</span><h1>KAYVEL</h1><p>{lang === 'ru' ? 'Твоя команда. Твой мир.' : 'Your team. Your world.'}</p></div><section className="home-skin" aria-label={lang === 'ru' ? 'Скин на главном экране' : 'Skin on home screen'}><div className="home-skin-heading"><span className="eyebrow">{savedNickname || t.profile}</span><button type="button" onClick={() => { setSkinOpen(true); setGameOpen(false); }}>{lang === 'ru' ? 'Изменить скин' : 'Change skin'}</button></div>{!skinOpen && <SkinPreview3D file={skinFile ?? skinHeadFile} model={skinModel} lang={lang} />}</section></div>
           </section>
         </div>
         <div className="launch-bar">
-          <div className="launch-copy"><span className="eyebrow">{t.game}</span><strong>{status?.gameRunning ? t.running : status?.neoforgeReady ? t.neoReady : t.neoWaiting}</strong>{(message || !status?.gameRunning) && <small role="status">{message || (status?.releaseConfigured ? t.downloadReady : t.noRelease)}</small>}<small>{lang === 'ru' ? 'Java → Minecraft → NeoForge → сборка с модами.' : 'Java → Minecraft → NeoForge → modpack.'}</small></div>
+          <div className="launch-copy"><span className="eyebrow">{t.game}</span><strong>{status?.gameRunning ? t.running : status?.neoforgeReady ? t.neoReady : t.neoWaiting}</strong><small role="status">{message}</small></div>
           <div className="actions"><button className="play" disabled={!status?.releaseConfigured || busy || status.preparingVanilla || status.preparingNeoForge || status.installing || status.modSwitching || status.gameRunning || !profileReady || !savedNickname || nickname !== savedNickname} onClick={() => void downloadAndPlay(Boolean(status?.preparationIncomplete))}>{status?.gameRunning ? t.running : busy ? t.preparing : status?.preparationIncomplete ? (lang === 'ru' ? 'Повторить загрузку' : 'Retry download') : status?.neoforgeReady ? t.play : (lang === 'ru' ? 'Скачать и играть' : 'Download and play')}<span>→</span></button></div>
         </div>
         {status?.downloadActive && <div className="download-controls"><button type="button" disabled={status.downloadCancelling} onClick={() => void cancelActiveDownload()}>{status.downloadCancelling ? (lang === 'ru' ? 'Останавливаем…' : 'Stopping…') : (lang === 'ru' ? 'Отменить загрузку' : 'Cancel download')}</button><small>{lang === 'ru' ? 'Текущая запись файлов или локальная подготовка NeoForge завершится безопасно. Игра после отмены не запустится.' : 'Any current file write or local NeoForge task will finish safely. Cancellation will not launch the game.'}</small></div>}
+        <details className={`home-updates${updateAvailable ? ' has-update' : ''}`}>
+          <summary><span>{lang === 'ru' ? 'Обновления' : 'Updates'}</span><small role="status">{updateSummary}</small></summary>
+          <div className="home-update-panels">
         <ModpackUpdatePanel status={status?.modpackUpdate ?? null} busy={busy || !status || status.gameRunning || status.preparingNeoForge || status.preparingVanilla || status.installing || status.modSwitching} checking={checkingUpdates} lang={lang} onCheck={() => void checkUpdates()} onUpdate={() => void applyUpdate()} />
+        <LauncherUpdatePanel status={status?.launcherUpdate ?? null} busy={busy || checkingUpdates || !status || status.gameRunning || status.preparingNeoForge || status.preparingVanilla || status.installing || status.modSwitching} lang={lang} onCheck={() => void checkLauncherUpdates()} onUpdate={() => void applyLauncherUpdate()} />
+          </div>
+        </details>
         {progress && !status?.gameRunning && <PreparationMeter progress={progress} lang={lang} />}
       </section>}
  {skinOpen && !settings && <div className="game-overlay" onMouseDown={event => { if (event.target === event.currentTarget) setSkinOpen(false); }}><section className="skin-dialog" role="dialog" aria-modal="true" aria-label={t.skinPreview}>

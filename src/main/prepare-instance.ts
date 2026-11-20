@@ -10,6 +10,7 @@ import { NEOFORGE_RUNTIME_FILES, prepareNeoForge } from './prepare-neoforge.js';
 import { PreparationFiles, type FileReceipt } from './preparation-files.js';
 import { stageProgress, type ReportProgress } from './preparation-progress.js';
 import { checkDownloadCancelled } from './download-session.js';
+import { prepareFFmpeg } from './prepare-ffmpeg.js';
 import { backupIncompletePreparation } from './preparation-recovery.js';
 
 export const INSTANCE_FOLDER = 'kayvel-1.21.1-neoforge-21.1.252-v3S';
@@ -76,8 +77,9 @@ export type PreparationDependencies = {
   minecraft: typeof prepareMinecraft;
   neoforge: typeof prepareNeoForge;
   modpack: typeof installRelease;
+  ffmpeg?: typeof prepareFFmpeg;
 };
-const defaults: PreparationDependencies = { java: prepareJava, minecraft: prepareMinecraft, neoforge: prepareNeoForge, modpack: installRelease };
+const defaults: PreparationDependencies = { java: prepareJava, minecraft: prepareMinecraft, neoforge: prepareNeoForge, modpack: installRelease, ffmpeg: prepareFFmpeg };
 
 export async function prepareInstance(userData: string, manifestUrl: string, publicKey: string, report: ReportProgress,
     dependencies: PreparationDependencies = defaults, expectedManifest?: Buffer, options: { retry?: boolean } = {}): Promise<string> {
@@ -93,7 +95,7 @@ export async function prepareInstance(userData: string, manifestUrl: string, pub
     if (await exists(join(root, incompletePath))) throw new Error('Подготовка не завершена. Файлы сохранены для проверки; автоматическое восстановление отключено.');
     if (!await exists(join(root, readyPath))) throw new Error('Каталог экземпляра уже существует без записи подготовки. Файлы не приняты и не изменены.');
     const releaseLock = await acquireGameDirectoryLock(root);
-    try { await verifyPreparation(root, publicKey, report); }
+    try { await verifyPreparation(root, publicKey, report); await dependencies.ffmpeg?.(root, report); }
     finally { await releaseLock(); }
     stageProgress(report, 'ready', 'Сборка проверена');
     return root;
@@ -126,6 +128,7 @@ export async function prepareInstance(userData: string, manifestUrl: string, pub
       await writeNewFile(root, readyPath, JSON.stringify({ schema: 1, instance: INSTANCE_FOLDER, files: [...files.receipts.values()] }));
       await verifyPreparedFiles(root, publicKey, report);
       await unlink(join(root, incompletePath));
+      await dependencies.ffmpeg?.(root, report);
       stageProgress(report, 'ready', 'Minecraft, NeoForge и сборка готовы');
       return root;
     } catch (error) {

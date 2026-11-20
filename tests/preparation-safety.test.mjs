@@ -35,7 +35,12 @@ test('preparation entry points refuse before creating files, fetching, or starti
 
 test('launch entry points do not show a network-isolation confirmation', async () => {
   const source = await readFile(new URL('../dist/main/main.js', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /confirmNetworkIsolation|confirmLaunchIsolation|showMessageBox/);
+  assert.doesNotMatch(source, /confirmNetworkIsolation|confirmLaunchIsolation/);
+  const gameEntries = source.slice(source.indexOf("ipcMain.handle('kayvel:play-neoforge'"));
+  assert.ok(gameEntries.includes('kayvel:play-neoforge'));
+  assert.doesNotMatch(gameEntries, /showMessageBox/);
+  assert.equal((source.match(/showMessageBox/g) ?? []).length, 1);
+  assert.match(source, /kayvel:launcher-update[\s\S]*?dialog\.showMessageBox/);
 });
 
 test('launch requires already available Java and does not request installation', () => {

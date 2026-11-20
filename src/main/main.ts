@@ -1,6 +1,6 @@
 import { cancellationMessage, cancelDownload, checkDownloadCancelled, configureDownloadRequest, withDownloadSignal } from './download-session.js';
 import { createChromiumDownloadRequest } from './chromium-download.js';
-import { app, BrowserWindow, ipcMain, nativeImage, net, session, screen, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, session, screen, shell } from 'electron';
 import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -19,6 +19,9 @@ import { createLocalProfileStore } from './local-profile.js';
 import { applyLocalSkin } from './game-skin.js';
 import { createGameBestStore } from './game-best.js';
 import { instancePath, prepareInstance, preparedJava, verifyPreparation } from './prepare-instance.js';
+import { prepareFFmpeg } from './prepare-ffmpeg.js';
+import { compareLauncherVersions, discoverLauncher, stageLauncherUpdate, type SignedLauncher } from './launcher-update.js';
+import type { LauncherUpdateStatus } from './launcher-update-status.js';
 import { stageProgress, type PreparationProgress } from './preparation-progress.js';
 
 let window: BrowserWindow | null = null;
@@ -165,6 +168,64 @@ ipcMain.handle('kayvel:modpack-update', async (event) => {
   } finally { installing = false; }
 });
 
+let launcherCandidate: SignedLauncher | null = null;
+let launcherUpdate: LauncherUpdateStatus = { state: 'unchecked', installedVersion: app.getVersion(), latestVersion: null, message: '' };
+ipcMain.handle('kayvel:launcher-check', async event => {
+  if (!trusted(event)) throw new Error('Untrusted renderer');
+  if (operationBusy() || launcherUpdate.state === 'checking') return { ...launcherUpdate };
+  launcherCandidate = null;
+  launcherUpdate = { ...launcherUpdate, state: 'checking', message: '' };
+  try {
+    const candidate = await discoverLauncher(MANIFEST_PUBLIC_KEY_PEM);
+    if (operationBusy()) throw new Error('Другая операция выполняется. Повторите проверку позже.');
+    if (!candidate) {
+      launcherUpdate = { ...launcherUpdate, state: 'unavailable', latestVersion: null, message: '' };
+      return { ...launcherUpdate };
+    }
+    const order = compareLauncherVersions(candidate.manifest.version, app.getVersion());
+    if (order < 0) throw new Error('Сервер предлагает старую версию лаунчера. Откат заблокирован.');
+    launcherCandidate = order > 0 ? candidate : null;
+    launcherUpdate = { ...launcherUpdate, state: order > 0 ? 'available' : 'current', latestVersion: candidate.manifest.version, message: '' };
+  } catch (error) {
+    launcherUpdate = { ...launcherUpdate, state: 'error', message: error instanceof Error ? error.message : 'Не удалось проверить обновление лаунчера.' };
+  }
+  return { ...launcherUpdate };
+});
+ipcMain.handle('kayvel:launcher-update', async (event, language: unknown) => {
+  if (!trusted(event)) return { ok: false, message: 'Недоступно.' };
+  if (operationBusy()) return { ok: false, message: 'Игра или другая операция уже выполняется.' };
+  if (!launcherCandidate || launcherUpdate.state !== 'available' || !window) return { ok: false, message: 'Сначала проверьте обновления лаунчера.' };
+  installing = true;
+  const ru = language !== 'en';
+  const candidate = launcherCandidate;
+  const controller = new AbortController();
+  try {
+    const answer = await dialog.showMessageBox(window, {
+      type: 'question', buttons: ru ? ['Скачать и открыть установщик', 'Отмена'] : ['Download and open installer', 'Cancel'],
+      defaultId: 1, cancelId: 1, title: 'KAYVEL',
+      message: ru ? `Обновить лаунчер до ${candidate.manifest.version}?` : `Update launcher to ${candidate.manifest.version}?`,
+      detail: ru ? 'Будет открыт отдельный установщик. Старая версия и игровые данные сохранятся. Это окно не закроется автоматически; закройте его сами перед запуском новой версии.' : 'A separate installer will open. The old version and game data are kept. This window will not close automatically; close it before launching the new version.'
+    });
+    if (answer.response !== 0) return { ok: false, message: ru ? 'Обновление отменено.' : 'Update cancelled.' };
+    downloadController = controller;
+    launcherUpdate = { ...launcherUpdate, state: 'downloading', message: '' };
+    const path = await withDownloadSignal(controller.signal, () => stageLauncherUpdate(app.getPath('userData'), candidate, MANIFEST_PUBLIC_KEY_PEM, app.getVersion(), (received, total) => {
+      reportPreparation({ stage: 'modpack', file: 'KAYVEL Setup', received, total, completedFiles: 0, totalFiles: 1 });
+    }));
+    controller.signal.throwIfAborted();
+    const error = await shell.openPath(path);
+    if (error) throw new Error('Не удалось открыть проверенный установщик.');
+    launcherCandidate = null;
+    const message = ru ? 'Установщик открыт. Закройте этот лаунчер перед запуском новой версии. Старая версия сохранена.' : 'Installer opened. Close this launcher before starting the new version. The old version is kept.';
+    launcherUpdate = { ...launcherUpdate, state: 'installer-open', message };
+    return { ok: true, message };
+  } catch (error) {
+    const message = controller.signal.aborted ? cancellationMessage : error instanceof Error ? error.message : 'Не удалось обновить лаунчер.';
+    launcherUpdate = { ...launcherUpdate, state: 'error', message };
+    return { ok: false, message };
+  } finally { installing = false; downloadController = null; clearPreparation(); }
+});
+
 ipcMain.handle('kayvel:status', (event) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
   return {
@@ -184,6 +245,7 @@ ipcMain.handle('kayvel:status', (event) => {
   gameRunning,
   installing,
   modSwitching,
+  launcherUpdate: { ...launcherUpdate },
   modpackUpdate: { ...modpackUpdate },
   preparationProgress
 };
@@ -319,6 +381,11 @@ async function playPreparedNeoForge(language: unknown) {
     const gamePath = neoforgePath();
     releaseGameLock = await acquireGameDirectoryLock(gamePath);
     await verifyPreparation(gamePath, MANIFEST_PUBLIC_KEY_PEM, reportPreparation);
+    const ffmpegController = new AbortController();
+    downloadController = ffmpegController;
+    try { await withDownloadSignal(ffmpegController.signal, () => prepareFFmpeg(gamePath, reportPreparation)); }
+    finally { downloadController = null; }
+    ffmpegController.signal.throwIfAborted();
     applyLocalSkin(gamePath, profile);
     const java = preparedJava(gamePath, app.getPath('userData'));
     stageProgress(reportPreparation, 'launch', 'Запуск Minecraft');
