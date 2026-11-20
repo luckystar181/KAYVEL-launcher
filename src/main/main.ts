@@ -17,6 +17,7 @@ import { createMemorySettingsStore } from './memory-settings.js';
 import { gamePreparationUnavailable } from './game-preparation.js';
 import { createLocalProfileStore } from './local-profile.js';
 import { applyLocalSkin } from './game-skin.js';
+import { applyGameDefaults } from './game-defaults.js';
 import { createGameBestStore } from './game-best.js';
 import { instancePath, prepareInstance, preparedJava, verifyPreparation } from './prepare-instance.js';
 import { prepareFFmpeg } from './prepare-ffmpeg.js';
@@ -387,6 +388,7 @@ async function playPreparedNeoForge(language: unknown) {
     finally { downloadController = null; }
     ffmpegController.signal.throwIfAborted();
     applyLocalSkin(gamePath, profile);
+    applyGameDefaults(gamePath);
     const java = preparedJava(gamePath, app.getPath('userData'));
     stageProgress(reportPreparation, 'launch', 'Запуск Minecraft');
     gameRunning = true;

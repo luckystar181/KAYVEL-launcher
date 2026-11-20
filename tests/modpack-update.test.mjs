@@ -7,6 +7,8 @@ import { acquireGameDirectoryLock, getInstalledManifest, withInstallationLock } 
 import { verifyPreparation, prepareInstance } from '../dist/main/prepare-instance.js';
 import { readModSwitches, setModEnabled } from '../dist/main/mod-switches.js';
 import { writeNewFile } from '../dist/main/install-files.js';
+import { applyLocalSkin, localSkinTemplate } from '../dist/main/game-skin.js';
+import { applyGameDefaults } from '../dist/main/game-defaults.js';
 import { signedPack, preparedFixture, pinnedUrl, publicKey, mockDownloads, stopped, optionalMod } from './helpers/modpack-fixture.mjs';
 
 const update = (root, pack, report = () => {}, processes = stopped) => updateModpack(root, pack, publicKey, report, processes, pinnedUrl);
@@ -46,6 +48,79 @@ test('update downloads only differences, backs up managed changes, and preserves
   await verifyPreparation(root, publicKey);
   await prepareInstance(userData, pinnedUrl, publicKey, () => {}, { ffmpeg: async () => {} });
   assert.equal(calls.length, 2, 'an already updated instance must not download or downgrade to the pin');
+});
+
+test('signed CSL seed installs and updates independently of mutable config and named PNGs', async t => {
+  const seedPath = 'kubejs/config/kayvel-customskinloader.json';
+  const seed = await readFile(new URL('../modpack/kubejs/config/kayvel-customskinloader.json', import.meta.url), 'utf8');
+  const old = signedPack('v0.2.0-v3S', { 'mods/fixture.jar': 'same', [seedPath]: JSON.stringify(localSkinTemplate) });
+  const { root } = await preparedFixture(t, old);
+  const release = await acquireGameDirectoryLock(root);
+  try { applyLocalSkin(root, { nickname: 'LocalPlayer', skin: null }); }
+  finally { await release(); }
+  const configPath = join(root, 'CustomSkinLoader/CustomSkinLoader.json');
+  const config = JSON.parse(await readFile(configPath, 'utf8'));
+  assert.deepEqual(config.loadlist, localSkinTemplate.loadlist);
+  config.version = '15.1';
+  config.buildNumber = 999;
+  config.loadlist[1].checkPNG = false;
+  const rewritten = JSON.stringify(config, null, 4);
+  await writeFile(configPath, rewritten);
+  await writeNewFile(root, 'CustomSkinLoader/LocalSkin/skins/OtherPlayer.png', 'personal PNG never executed');
+  await verifyPreparation(root, publicKey);
+  const next = signedPack('v0.2.1-v3S', { 'mods/fixture.jar': 'same', [seedPath]: seed, 'mods/freecam-fixture.jar': 'fictional mod never executed' });
+  const calls = mockDownloads(t, next);
+  await update(root, next);
+  assert.equal(calls.length, 2);
+  assert.equal(await text(root, seedPath), seed);
+  assert.equal(await readFile(configPath, 'utf8'), rewritten);
+  const releaseNext = await acquireGameDirectoryLock(root);
+  try { applyLocalSkin(root, { nickname: 'LocalPlayer', skin: null }); }
+  finally { await releaseNext(); }
+  assert.equal(await readFile(configPath, 'utf8'), rewritten);
+  assert.equal(await text(root, 'CustomSkinLoader/LocalSkin/skins/OtherPlayer.png'), 'personal PNG never executed');
+  await verifyPreparation(root, publicKey);
+  await writeFile(join(root, seedPath), seed + ' ');
+  await assert.rejects(verifyPreparation(root, publicKey));
+  assert.equal(await readFile(configPath, 'utf8'), rewritten);
+});
+
+test('one-time key and server defaults preserve preparation verification and player choices across signed updates', async t => {
+  const { root } = await preparedFixture(t);
+  const originalOptions = Buffer.from('soundCategory_master:0.4\r\nkey_key.custom:key.keyboard.x\r\n');
+  const originalServers = Buffer.from([10, 0, 0, 0]);
+  await writeNewFile(root, 'options.txt', originalOptions);
+  await writeNewFile(root, 'servers.dat', originalServers);
+  await verifyPreparation(root, publicKey);
+  const release = await acquireGameDirectoryLock(root);
+  try {
+    await verifyPreparation(root, publicKey);
+    applyGameDefaults(root);
+    await verifyPreparation(root, publicKey);
+  } finally { await release(); }
+  assert.ok((await text(root, 'options.txt')).includes('key_key.sable_player_ragdoll.ragdoll:key.keyboard.x\r\n'));
+  assert.ok((await text(root, 'options.txt')).includes('key_key.freecam.toggle:key.keyboard.c\r\n'));
+  assert.ok((await text(root, 'servers.dat')).includes('c4.play2go.cloud:20203'));
+  const defaults = new Map(await Promise.all((await readdir(join(root, '.kayvel/game-defaults-v1')))
+    .map(async name => [name, await readFile(join(root, '.kayvel/game-defaults-v1', name))])));
+  assert.ok([...defaults.values()].some(bytes => bytes.equals(originalOptions)));
+  assert.ok([...defaults.values()].some(bytes => bytes.equals(originalServers)));
+  const playerOptions = 'soundCategory_master:0.8\nkey_key.freecam.toggle:key.keyboard.j\n';
+  await writeFile(join(root, 'options.txt'), playerOptions);
+  await writeFile(join(root, 'servers.dat'), originalServers);
+  const next = signedPack('v0.2.1-v3S', { 'mods/fixture.jar': 'updated fixture never executed' });
+  mockDownloads(t, next);
+  await update(root, next);
+  const releaseNext = await acquireGameDirectoryLock(root);
+  try {
+    await verifyPreparation(root, publicKey);
+    applyGameDefaults(root);
+    await verifyPreparation(root, publicKey);
+  } finally { await releaseNext(); }
+  assert.equal(await text(root, 'options.txt'), playerOptions);
+  assert.deepEqual(await readFile(join(root, 'servers.dat')), originalServers);
+  assert.deepEqual((await readdir(join(root, '.kayvel/game-defaults-v1'))).sort(), [...defaults.keys()].sort());
+  for (const [name, bytes] of defaults) assert.deepEqual(await readFile(join(root, '.kayvel/game-defaults-v1', name)), bytes);
 });
 
 test('optional disabled state survives replacement and the new file can be enabled', async t => {

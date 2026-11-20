@@ -1,0 +1,23 @@
+{
+  "loadlist": [
+    {
+      "name": "KAYVEL Local PNG v2",
+      "type": "CustomSkinAPI",
+      "root": "KAYVEL-Local-v2/"
+    },
+    {
+      "name": "LocalSkin",
+      "type": "Legacy",
+      "skin": "LocalSkin/skins/{USERNAME}.png",
+      "cape": "LocalSkin/capes/{USERNAME}.png",
+      "elytra": "LocalSkin/elytras/{USERNAME}.png",
+      "model": "auto"
+    },
+    {
+      "name": "Mojang",
+      "type": "MojangAPI"
+    }
+  ],
+  "enableLocalProfileCache": false,
+  "forceLoadAllTextures": true
+}

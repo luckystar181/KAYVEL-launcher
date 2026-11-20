@@ -79,6 +79,7 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
       };
     } },
     './game-skin.js': { applyLocalSkin: () => assert.fail('Unexpected skin application') },
+    './game-defaults.js': { applyGameDefaults: () => assert.fail('Unexpected game defaults application') },
     './game-best.js': { createGameBestStore: () => ({ read: () => 0, save: score => score }) },
     './prepare-instance.js': { instancePath: path => join(path, 'instances', 'kayvel-1.21.1-neoforge-21.1.252-v3S') },
     './prepare-ffmpeg.js': { prepareFFmpeg: async () => {} },
@@ -280,6 +281,7 @@ test('main refuses preparation and the old modpack without running installers', 
 
 function preparedModules(prepareInstance, extra = {}) {
   return {
+    './game-defaults.js': { applyGameDefaults: () => {} },
     'node:fs': { existsSync: path => path.endsWith(join('.preparation', 'ready.json')) || path.endsWith(join('instances', 'fixture')), lstatSync: missingEntry },
     './prepare-instance.js': {
       instancePath: path => join(path, 'instances', 'fixture'), prepareInstance,
@@ -617,6 +619,40 @@ for (const failSkin of [false, true]) {
     if (failSkin) assert.match(result.message, /skin conflict/);
     else {
       assert.equal(result.message, '');
+      child.emit('exit', 0);
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal(order.at(-1), 'unlock');
+    }
+  });
+}
+
+for (const failDefaults of [false, true]) {
+  test(`game defaults run under the verified game lock before Java; failure=${failDefaults}`, async () => {
+    const order = [];
+    const child = Object.assign(new EventEmitter(), { pid: 123, exitCode: null, signalCode: null });
+    const dependencies = preparedModules(async () => assert.fail('Direct launch does not prepare'), {
+      verifyPreparation: async () => { order.push('verify'); },
+      preparedJava: () => { order.push('java'); return 'fixture-java'; }
+    });
+    const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: {
+      ...dependencies,
+      './installer.js': { acquireGameDirectoryLock: async () => { order.push('lock'); return async () => { order.push('unlock'); }; } },
+      './game-skin.js': { applyLocalSkin: () => { order.push('skin'); } },
+      './game-defaults.js': { applyGameDefaults: path => {
+        order.push('defaults');
+        assert.equal(path, join('fictional-profile', 'launcher', 'instances', 'fixture'));
+        if (failDefaults) throw new Error('fixture defaults conflict');
+      } },
+      './game-process.js': { createGameExitReporter, watchLockedGame },
+      './neoforge.js': { ...dependencies['./neoforge.js'], launchNeoForge: async (_path, _name, _java, observe) => { order.push('launch'); observe(child); } }
+    } });
+    const result = await main.invoke('kayvel:play-neoforge', 'ru');
+    assert.equal(result.ok, !failDefaults);
+    assert.deepEqual(order, failDefaults ? ['lock', 'verify', 'skin', 'defaults', 'unlock'] : ['lock', 'verify', 'skin', 'defaults', 'java', 'launch']);
+    if (failDefaults) {
+      assert.match(result.message, /defaults conflict/);
+      assert.equal(main.invoke('kayvel:status').gameRunning, false);
+    } else {
       child.emit('exit', 0);
       await new Promise(resolve => setImmediate(resolve));
       assert.equal(order.at(-1), 'unlock');
