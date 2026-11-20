@@ -21,11 +21,13 @@
 
 - В версии 0.2.11: при ошибке PowerShell/CIM список процессов запрашивается через встроенный `KAYVEL-ProcessSnapshot.exe` (Windows Toolhelp32 API), без PowerShell/WMI и прав администратора. Сохраняются родительские PID и запрет работы при Java/Minecraft или другом лаунчере. Если резервный запрос тоже не удался либо ответ некорректен, блокировка остаётся.
 
-**Актуальные стабильные выпуски (Latest):** [лаунчер 0.2.10](https://github.com/luckystar181/KAYVEL-launcher/releases/tag/v0.2.10-v3S) и [модпак v0.2.5-v3S](https://github.com/luckystar181/KAYVEL-mods/releases/tag/v0.2.5-v3S). [Скачать установщик Windows x64](https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.10-v3S/KAYVEL-Setup-v3S.exe). Прежние релизы и assets сохранены; рабочая установка автоматически не обновлялась.
+**Актуальные стабильные выпуски (Latest):** [лаунчер 0.2.11](https://github.com/luckystar181/KAYVEL-launcher/releases/tag/v0.2.11-v3S) и [модпак v0.2.5-v3S](https://github.com/luckystar181/KAYVEL-mods/releases/tag/v0.2.5-v3S). [Скачать установщик Windows x64](https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.11-v3S/KAYVEL-Setup-v3S.exe). Прежние релизы и assets сохранены; рабочая установка автоматически не обновлялась.
 
 ## Исправления проверки процессов и загрузки FFmpeg — 0.2.11
 
-Подготовлен отдельный выпуск для ошибки «Не удалось проверить процессы Windows (PowerShell: код выхода 1)». Первичный запрос `Get-CimInstance Win32_Process` сохранён. Только при ошибке запуска/выполнения используется собственный native-helper; небезопасный или повреждённый успешный ответ не заменяется повторной проверкой. Helper включается в portable и установщик при сборке; нужны Windows x64 и системный .NET Framework 4.x, как для существующего установщика. Сборка helper выполняется `scripts/build-process-snapshot.mjs` через системный `csc.exe`.
+Опубликован stable Latest **20.11.2026 16:02:32 UTC / 19:02:32 МСК**: [релиз v0.2.11-v3S](https://github.com/luckystar181/KAYVEL-launcher/releases/tag/v0.2.11-v3S). Все пять удалённых assets сверены по размеру/SHA-256; прежние релизы лаунчера и модпака сохранены. Модпак Latest остаётся `v0.2.5-v3S`.
+
+Отдельный выпуск исправляет ошибку «Не удалось проверить процессы Windows (PowerShell: код выхода 1)». Первичный запрос `Get-CimInstance Win32_Process` сохранён. Только при ошибке запуска/выполнения используется собственный native-helper; небезопасный или повреждённый успешный ответ не заменяется повторной проверкой. Helper включается в portable и установщик при сборке; нужны Windows x64 и системный .NET Framework 4.x, как для существующего установщика. Сборка helper выполняется `scripts/build-process-snapshot.mjs` через системный `csc.exe`.
 
 Если старый лаунчер блокирует также своё обновление, новый установщик нужно скачать напрямую со страницы нового релиза, закрыть игру и лаунчер и установить вручную. Запуск от администратора и изменение WMI-служб не требуются. Состав модпака этим исправлением не меняется.
 
