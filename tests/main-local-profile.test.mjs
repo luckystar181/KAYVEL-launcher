@@ -25,7 +25,7 @@ test('published local-profile release is configured without the historical Core 
   assert.ok(source.includes('const localProfileReleaseReady = true;'));
 });
 
-async function isolatedMain({ activateRelease = false, nickname = '', overrides = {}, confirm, openPath = async () => '' } = {}) {
+async function isolatedMain({ activateRelease = false, nickname = '', overrides = {}, confirm, openPath = async () => '', openInstaller = () => assert.fail('Unexpected installer process') } = {}) {
   const handlers = new Map();
   const sent = [];
   const sender = { setWindowOpenHandler() {}, on() {}, send: (...args) => sent.push(args) };
@@ -33,12 +33,13 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
   const profile = { nickname, skin: null };
   const root = join('fictional-profile', 'launcher');
   let ready;
+  let quits = 0;
   const modules = {
     './chromium-download.js': { createChromiumDownloadRequest: () => () => assert.fail('No live network in VM') },
     './download-session.js': { ...downloadSession, configureDownloadRequest() {} },
     electron: {
       shell: { openPath },
-      app: { getVersion: () => '0.2.7', getPath: () => root, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
+      app: { getVersion: () => '0.2.7', getPath: () => root, quit: () => { quits++; }, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
       BrowserWindow: class {
         webContents = sender;
         on() {}
@@ -84,6 +85,8 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
     './prepare-instance.js': { instancePath: path => join(path, 'instances', 'kayvel-1.21.1-neoforge-21.1.252-v3S') },
     './prepare-ffmpeg.js': { prepareFFmpeg: async () => {} },
     './launcher-update.js': { compareLauncherVersions: (a, b) => a.localeCompare(b), discoverLauncher: async () => { throw new Error('No live launcher channel in VM'); }, stageLauncherUpdate: () => assert.fail('Unexpected launcher installer') },
+    './installer-handoff.js': { openUpdateInstaller: openInstaller },
+    './lock-processes.js': { assertRecoveryProcessesStopped: async () => {} },
     './preparation-progress.js': { stageProgress },
     ...overrides
   };
@@ -103,7 +106,7 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
     }
   });
   await ready();
-  return { handlers, event, sent, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) };
+  return { handlers, event, sent, quits: () => quits, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) };
 }
 
 function launcherModules({ version = '0.2.8', discover, stage } = {}) {
@@ -145,11 +148,12 @@ test('launcher install requires private candidate, trusted sender and native con
   assert.equal(main.invoke('kayvel:status').launcherUpdate.state, 'available');
   assert.equal(main.invoke('kayvel:status').installing, false);
 });
-test('launcher install opens only the staged installer and blocks competing operations during native confirmation', async () => {
+test('launcher keeps operations blocked until successful installer handoff and quits only its own app', async () => {
   const answer = deferred();
   const opened = [];
+  let handoff;
   let downloads = 0;
-  const main = await isolatedMain({ activateRelease: true, confirm: () => answer.promise, openPath: async path => { opened.push(path); return ''; },
+  const main = await isolatedMain({ activateRelease: true, confirm: () => answer.promise, openInstaller: async (path, callbacks) => { opened.push(path); handoff = callbacks; },
     overrides: launcherModules({ stage: async (root, pack, key, current) => {
       downloads++; assert.equal(current, '0.2.7'); assert.equal(pack.manifest.version, '0.2.8'); assert.equal(key, 'fictional-public-key');
       assert.equal(root, join('fictional-profile', 'launcher')); return 'fictional-verified-installer.exe';
@@ -158,22 +162,63 @@ test('launcher install opens only the staged installer and blocks competing oper
   const pending = main.invoke('kayvel:launcher-update', 'ru', { url: 'https://untrusted.invalid' });
   assert.equal(downloads, 0);
   assert.equal(main.invoke('kayvel:status').installing, true);
-  for (const channel of ['kayvel:launcher-update', 'kayvel:download-and-play', 'kayvel:retry-download', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:mod-switch-set', 'kayvel:modpack-update']) assert.equal((await main.invoke(channel, 'ru')).ok, false);
+  const blocked = async () => {
+    for (const channel of ['kayvel:launcher-update', 'kayvel:download-and-play', 'kayvel:retry-download', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:mod-switch-set', 'kayvel:modpack-update']) assert.equal((await main.invoke(channel, 'ru')).ok, false);
+  };
+  await blocked();
   assert.equal((await main.invoke('kayvel:launcher-check')).state, 'available');
   answer.resolve({ response: 0 });
   assert.equal((await pending).ok, true);
   assert.equal(downloads, 1);
   assert.deepEqual(opened, ['fictional-verified-installer.exe']);
   assert.equal(main.invoke('kayvel:status').launcherUpdate.state, 'installer-open');
+  assert.equal(main.invoke('kayvel:status').installing, true);
+  assert.equal(main.invoke('kayvel:status').downloadActive, false);
+  assert.equal(main.quits(), 0);
+  await blocked();
+  await handoff.canQuit();
+  assert.equal(main.quits(), 0);
+  handoff.quit();
+  assert.equal(main.quits(), 1);
   assert.equal(main.invoke('kayvel:status').installing, false);
-  assert.equal((await main.invoke('kayvel:launcher-update', 'ru')).ok, false);
 });
-for (const scenario of ['cancel', 'bad-hash', 'shell-failure']) {
+
+for (const failure of ['cancelled setup', 'installation failed', 'broken handoff']) {
+  test(`installer failure preserves old launcher and releases operation guard: ${failure}`, async () => {
+    let handoff;
+    const main = await isolatedMain({ confirm: async () => ({ response: 0 }),
+      openInstaller: async (_path, callbacks) => { handoff = callbacks; },
+      overrides: launcherModules({ stage: async () => 'fictional-verified-installer.exe' }) });
+    await main.invoke('kayvel:launcher-check');
+    assert.equal((await main.invoke('kayvel:launcher-update')).ok, true);
+    handoff.ended(new Error(failure));
+    assert.equal(main.quits(), 0);
+    assert.equal(main.invoke('kayvel:status').installing, false);
+    assert.equal(main.invoke('kayvel:status').launcherUpdate.state, 'error');
+  });
+}
+
+for (const point of ['before setup', 'before quit']) {
+  test(`external Java or launcher blocks automatic transition ${point}`, async () => {
+    let scans = 0, handoff;
+    const main = await isolatedMain({ confirm: async () => ({ response: 0 }),
+      openInstaller: async (_path, callbacks) => { handoff = callbacks; },
+      overrides: { ...launcherModules({ stage: async () => 'fictional-verified-installer.exe' }),
+        './lock-processes.js': { assertRecoveryProcessesStopped: async () => { if (++scans === (point === 'before setup' ? 1 : 2)) throw new Error('Processes still running'); } } } });
+    await main.invoke('kayvel:launcher-check');
+    const result = await main.invoke('kayvel:launcher-update');
+    if (point === 'before setup') { assert.equal(result.ok, false); assert.equal(handoff, undefined); }
+    else { assert.equal(result.ok, true); await assert.rejects(handoff.canQuit(), /running/); }
+    assert.equal(main.quits(), 0);
+  });
+}
+
+for (const scenario of ['cancel', 'bad-hash', 'spawn-failure']) {
   test(`launcher install fails closed and clears busy state: ${scenario}`, async () => {
     const staged = deferred();
     let opens = 0;
     let signal;
-    const main = await isolatedMain({ confirm: async () => ({ response: 0 }), openPath: async () => { opens++; return 'fixture shell error'; },
+    const main = await isolatedMain({ confirm: async () => ({ response: 0 }), openInstaller: async () => { opens++; throw new Error('fixture spawn error'); },
       overrides: launcherModules({ stage: async () => {
         signal = downloadSession.downloadSignal();
         await staged.promise;
@@ -191,7 +236,7 @@ for (const scenario of ['cancel', 'bad-hash', 'shell-failure']) {
     }
     staged.resolve();
     assert.equal((await pending).ok, false);
-    assert.equal(opens, scenario === 'shell-failure' ? 1 : 0);
+    assert.equal(opens, scenario === 'spawn-failure' ? 1 : 0);
     const status = main.invoke('kayvel:status');
     assert.equal(status.installing, false); assert.equal(status.downloadActive, false);
     assert.equal(status.launcherUpdate.state, 'error');

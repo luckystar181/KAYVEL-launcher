@@ -22,6 +22,8 @@ import { createGameBestStore } from './game-best.js';
 import { instancePath, prepareInstance, preparedJava, verifyPreparation } from './prepare-instance.js';
 import { prepareFFmpeg } from './prepare-ffmpeg.js';
 import { compareLauncherVersions, discoverLauncher, stageLauncherUpdate, type SignedLauncher } from './launcher-update.js';
+import { openUpdateInstaller } from './installer-handoff.js';
+import { assertRecoveryProcessesStopped } from './lock-processes.js';
 import type { LauncherUpdateStatus } from './launcher-update-status.js';
 import { stageProgress, type PreparationProgress } from './preparation-progress.js';
 
@@ -107,7 +109,9 @@ app.whenReady().then(async () => {
     if (!downloadController && !installing) return;
     event.preventDefault();
     if (downloadController) cancelDownload(downloadController);
-    stageProgress(reportPreparation, 'verify', 'Дождитесь завершения записи файлов и остановки подготовки, затем закройте окно.');
+    stageProgress(reportPreparation, 'verify', launcherUpdate.state === 'installer-open'
+      ? 'Завершите или закройте установщик. После успешной установки лаунчер переключится автоматически.'
+      : 'Дождитесь завершения записи файлов и остановки подготовки, затем закройте окно.');
   });
   window.on('closed', () => { window = null; });
   window.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
@@ -200,12 +204,13 @@ ipcMain.handle('kayvel:launcher-update', async (event, language: unknown) => {
   const ru = language !== 'en';
   const candidate = launcherCandidate;
   const controller = new AbortController();
+  let handoffOpen = false;
   try {
     const answer = await dialog.showMessageBox(window, {
       type: 'question', buttons: ru ? ['Скачать и открыть установщик', 'Отмена'] : ['Download and open installer', 'Cancel'],
       defaultId: 1, cancelId: 1, title: 'KAYVEL',
       message: ru ? `Обновить лаунчер до ${candidate.manifest.version}?` : `Update launcher to ${candidate.manifest.version}?`,
-      detail: ru ? 'Будет открыт отдельный установщик. Старая версия и игровые данные сохранятся. Это окно не закроется автоматически; закройте его сами перед запуском новой версии.' : 'A separate installer will open. The old version and game data are kept. This window will not close automatically; close it before launching the new version.'
+      detail: ru ? 'Будет открыт отдельный установщик. После успешной установки это окно закроется и откроется новая версия. При отмене или ошибке старый лаунчер продолжит работать. Старые файлы и игровые данные сохранятся.' : 'A separate installer will open. After a successful installation, this window will close and the new version will open. If installation is cancelled or fails, the old launcher will keep running. Old files and game data are kept.'
     });
     if (answer.response !== 0) return { ok: false, message: ru ? 'Обновление отменено.' : 'Update cancelled.' };
     downloadController = controller;
@@ -214,17 +219,37 @@ ipcMain.handle('kayvel:launcher-update', async (event, language: unknown) => {
       reportPreparation({ stage: 'modpack', file: 'KAYVEL Setup', received, total, completedFiles: 0, totalFiles: 1 });
     }));
     controller.signal.throwIfAborted();
-    const error = await shell.openPath(path);
-    if (error) throw new Error('Не удалось открыть проверенный установщик.');
+    await assertRecoveryProcessesStopped();
+    controller.signal.throwIfAborted();
+    handoffOpen = true;
+    await openUpdateInstaller(path, {
+      canQuit: async () => {
+        await assertRecoveryProcessesStopped();
+        if (!installing || gameRunning || modSwitching || preparingVanilla || preparingNeoForge || controller.signal.aborted) throw new Error('Launcher is busy');
+      },
+      quit: () => {
+        handoffOpen = false;
+        installing = false;
+        downloadController = null;
+        app.quit();
+      },
+      ended: error => {
+        handoffOpen = false;
+        installing = false;
+        launcherUpdate = { ...launcherUpdate, state: 'error', message: error.message };
+      }
+    });
+    if (!handoffOpen) return { ok: false, message: launcherUpdate.message };
     launcherCandidate = null;
-    const message = ru ? 'Установщик открыт. Закройте этот лаунчер перед запуском новой версии. Старая версия сохранена.' : 'Installer opened. Close this launcher before starting the new version. The old version is kept.';
+    const message = ru ? 'Установщик открыт. После успешной установки лаунчер автоматически перейдёт на новую версию. При отмене старый останется работать.' : 'Installer opened. After a successful installation, the launcher will switch to the new version automatically. If cancelled, the old launcher will keep running.';
     launcherUpdate = { ...launcherUpdate, state: 'installer-open', message };
     return { ok: true, message };
   } catch (error) {
+    handoffOpen = false;
     const message = controller.signal.aborted ? cancellationMessage : error instanceof Error ? error.message : 'Не удалось обновить лаунчер.';
     launcherUpdate = { ...launcherUpdate, state: 'error', message };
     return { ok: false, message };
-  } finally { installing = false; downloadController = null; clearPreparation(); }
+  } finally { if (!handoffOpen) installing = false; downloadController = null; clearPreparation(); }
 });
 
 ipcMain.handle('kayvel:status', (event) => {
