@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from 'node:fs/promises';
 import { join } from 'node:path';
-import { FFMPEG_ARCHIVE, FFMPEG_FILES, ffmpegDownloadUrl, prepareFFmpeg, verifyFFmpeg } from '../dist/main/prepare-ffmpeg.js';
+import { FFMPEG_ARCHIVE, FFMPEG_MIRROR_URL, FFMPEG_FILES, ffmpegDownloadUrl, prepareFFmpeg, verifyFFmpeg } from '../dist/main/prepare-ffmpeg.js';
 import { withDownloadSignal } from '../dist/main/download-session.js';
 
 async function workspace(t) {
@@ -12,7 +12,11 @@ async function workspace(t) {
 }
 const noDownload = async () => assert.fail('No network allowed');
 
-test('FFmpeg is pinned to one HTTPS upstream archive with exact hashes and includes licensing', () => {
+test('FFmpeg pins identical archives on the author HTTPS sources and includes licensing', () => {
+  assert.equal(ffmpegDownloadUrl(FFMPEG_MIRROR_URL), FFMPEG_MIRROR_URL);
+  const cdn = 'https://release-assets.githubusercontent.com/github-production-release-asset/306803927/ec41afc5-b8db-4147-92b5-ad9b9672e9b5?fixture=signature';
+  assert.equal(ffmpegDownloadUrl(cdn), cdn);
+  for (const url of [cdn.replace('306803927', '123'), cdn.replace('https:', 'http:'), cdn + '#fragment', cdn.replace('https://', 'https://user@'), FFMPEG_MIRROR_URL + '?query', FFMPEG_MIRROR_URL.replace('GyanD', 'other')]) assert.throws(() => ffmpegDownloadUrl(url));
   assert.equal(ffmpegDownloadUrl(FFMPEG_ARCHIVE.url), FFMPEG_ARCHIVE.url);
   assert.equal(FFMPEG_ARCHIVE.algorithm, 'sha256');
   assert.match(FFMPEG_ARCHIVE.hash, /^[a-f0-9]{64}$/);

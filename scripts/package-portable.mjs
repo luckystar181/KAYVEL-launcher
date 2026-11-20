@@ -14,6 +14,7 @@ const outputName = portableOutputName(process.argv.slice(2));
 if (process.platform !== 'win32' || process.arch !== 'x64') throw new Error('Portable build requires Windows x64.');
 await stat(join(electron, 'electron.exe'));
 await stat(join(root, 'dist', 'main', 'main.js'));
+await stat(join(root, 'dist', 'main', 'KAYVEL-ProcessSnapshot.exe'));
 await stat(join(root, 'dist', 'renderer', 'index.html'));
 
 const java = await readBundledJava(join(root, 'bundled', 'java.zip'));
@@ -33,6 +34,7 @@ for (const [name, bytes] of legal) {
 }
 await rename(join(target, 'electron.exe'), join(target, 'KAYVEL.exe'));
 await copyLauncherMain(join(root, 'dist', 'main'), join(app, 'dist', 'main'));
+await cp(join(root, 'dist', 'main', 'KAYVEL-ProcessSnapshot.exe'), join(app, 'dist', 'main', 'KAYVEL-ProcessSnapshot.exe'), { errorOnExist: true, force: false });
 await cp(join(root, 'dist', 'renderer'), join(app, 'dist', 'renderer'), { recursive: true });
 await cp(join(root, 'package-lock.json'), join(app, 'package-lock.json'));
 const { name, version, main, type, dependencies, overrides } = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));

@@ -38,7 +38,7 @@ internal static class InstallerTests
     {
         using (var file = File.OpenRead(zip))
         using (var sha = SHA256.Create()) return new Settings {
-            Version = "v0.2.10-v3S", Url = "https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.10-v3S/KAYVEL-v3S-windows-x64.zip",
+            Version = "v0.2.11-v3S", Url = "https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.11-v3S/KAYVEL-v3S-windows-x64.zip",
             Sha256 = InstallerCore.Hex(sha.ComputeHash(file)), Bytes = file.Length
         };
     }

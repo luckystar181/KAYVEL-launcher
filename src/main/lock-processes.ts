@@ -1,6 +1,7 @@
 import { execFile } from 'node:child_process';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
+import { fileURLToPath } from 'node:url';
 
 const executeFile = promisify(execFile);
 export type ProcessEntry = { pid: number; parentPid: number; name: string };
@@ -36,7 +37,7 @@ export function assertNoGameProcesses(entries: ProcessEntry[], currentPid = proc
   }
 }
 
-function processQueryFailure(error: unknown): Error {
+function processQueryReason(error: unknown): string {
   const detail = error && typeof error === 'object' ? error as {
     code?: unknown; signal?: unknown; killed?: unknown; stderr?: unknown;
   } : {};
@@ -54,21 +55,31 @@ function processQueryFailure(error: unknown): Error {
     const id = /FullyQualifiedErrorId\s*:\s*([A-Za-z][A-Za-z0-9_.-]{0,79})(?=[,\s]|$)/.exec(stderr)?.[1];
     if (id) reasons.push(`PowerShell ${id}`);
   }
-  return new Error(`Не удалось проверить процессы Windows (PowerShell: ${reasons.join('; ') || 'причина не распознана'}). Блокировка сохранена.`, { cause: error });
+  return reasons.join('; ') || 'причина не распознана';
 }
 
 export async function assertRecoveryProcessesStopped(): Promise<void> {
   if (process.platform !== 'win32') throw new Error('Проверка старой блокировки поддерживается только в Windows; блокировка сохранена.');
   const powershell = join(process.env.SystemRoot || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
   let stdout: string;
+  let provider = 'PowerShell';
+  const options = { windowsHide: true, timeout: 15000, maxBuffer: 4_000_000, encoding: 'utf8' as const };
   try {
     ({ stdout } = await executeFile(powershell, ['-NoLogo', '-NoProfile', '-NonInteractive', '-Command',
-      '$ErrorActionPreference="Stop"; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name) | ConvertTo-Json -Compress'],
-    { windowsHide: true, timeout: 15000, maxBuffer: 4_000_000, encoding: 'utf8' }));
-  } catch (error) { throw processQueryFailure(error); }
+      '$ErrorActionPreference="Stop"; @(Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name) | ConvertTo-Json -Compress'], options));
+  } catch (primaryError) {
+    provider = 'Windows API';
+    try {
+      const helper = fileURLToPath(new URL('./KAYVEL-ProcessSnapshot.exe', import.meta.url));
+      ({ stdout } = await executeFile(helper, [], options));
+    } catch (nativeError) {
+      throw new Error(`Не удалось проверить процессы Windows (PowerShell: ${processQueryReason(primaryError)}; Windows API: ${processQueryReason(nativeError)}). Блокировка сохранена.`,
+        { cause: new AggregateError([primaryError, nativeError]) });
+    }
+  }
   let records: unknown;
   try { records = JSON.parse(stdout.replace(/^\uFEFF/, '')); }
-  catch (error) { throw new Error('Не удалось проверить процессы Windows: PowerShell вернул неверный JSON; блокировка сохранена.', { cause: error }); }
+  catch (error) { throw new Error(`Не удалось проверить процессы Windows: ${provider} вернул неверный JSON; блокировка сохранена.`, { cause: error }); }
   if (!Array.isArray(records) || records.some(record => !record || typeof record !== 'object')) throw new Error('Не удалось проверить процессы; блокировка сохранена.');
   const entries = records.map((record: { ProcessId?: unknown; ParentProcessId?: unknown; Name?: unknown }) => ({
     pid: record?.ProcessId as number, parentPid: record?.ParentProcessId as number, name: record?.Name as string

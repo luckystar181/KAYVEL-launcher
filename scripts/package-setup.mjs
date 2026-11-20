@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import { spawnSync } from 'node:child_process';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
-export const setupVersion = 'v0.2.10-v3S';
+export const setupVersion = 'v0.2.11-v3S';
 export const payloadName = 'KAYVEL-v3S-windows-x64.zip';
 
 export function installerSettings(bytes, sha256) {
@@ -35,11 +35,11 @@ export async function packageSetup(portable, output) {
   portable = resolve(portable);
   output = resolve(output);
   await plainTree(portable);
-  for (const file of ['KAYVEL.exe', 'resources/app/dist/main/main.js', 'resources/app/package.json']) {
+  for (const file of ['KAYVEL.exe', 'resources/app/dist/main/main.js', 'resources/app/dist/main/KAYVEL-ProcessSnapshot.exe', 'resources/app/package.json']) {
     if (!(await lstat(join(portable, file))).isFile()) throw new Error('Incomplete portable: ' + file);
   }
   const app = JSON.parse(await readFile(join(portable, 'resources/app/package.json'), 'utf8'));
-  if (app.version !== '0.2.10') throw new Error('Setup requires launcher 0.2.10.');
+  if (app.version !== '0.2.11') throw new Error('Setup requires launcher 0.2.11.');
   const release = await readFile(join(portable, 'resources/app/dist/main/release.js'), 'utf8');
   if (!release.includes('/releases/download/v0.2.0-v3S/manifest.json')) throw new Error('Portable must target the v3S modpack.');
   await reserveSetupOutput(output);

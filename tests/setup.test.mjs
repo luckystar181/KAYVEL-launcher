@@ -25,8 +25,8 @@ test('setup creates missing output parents but never reuses an existing build', 
 
 test('setup payload is pinned to a separate v3S launcher release, size and SHA-256', () => {
   const settings = installerSettings(123, 'a'.repeat(64));
-  assert.equal(settings.Url, 'https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.10-v3S/KAYVEL-v3S-windows-x64.zip');
-  assert.equal(settings.Version, 'v0.2.10-v3S');
+  assert.equal(settings.Url, 'https://github.com/luckystar181/KAYVEL-launcher/releases/download/v0.2.11-v3S/KAYVEL-v3S-windows-x64.zip');
+  assert.equal(settings.Version, 'v0.2.11-v3S');
   assert.equal(settings.Bytes, 123);
   assert.equal(settings.Sha256, 'a'.repeat(64));
   for (const bytes of [0, -1, 1.5, NaN, 1_000_000_001]) assert.throws(() => installerSettings(bytes, 'a'.repeat(64)));
@@ -40,8 +40,9 @@ test('setup packages a minimal fixture with Windows PowerShell and embeds the ve
   await mkdir(main, { recursive: true });
   await writeFile(join(portable, 'KAYVEL.exe'), 'fixture-not-executable', { flag: 'wx' });
   await writeFile(join(main, 'main.js'), '// fixture', { flag: 'wx' });
+  await writeFile(join(main, 'KAYVEL-ProcessSnapshot.exe'), 'fixture-native-helper', { flag: 'wx' });
   await writeFile(join(main, 'release.js'), '// /releases/download/v0.2.0-v3S/manifest.json', { flag: 'wx' });
-  await writeFile(join(portable, 'resources', 'app', 'package.json'), JSON.stringify({ version: '0.2.10' }), { flag: 'wx' });
+  await writeFile(join(portable, 'resources', 'app', 'package.json'), JSON.stringify({ version: '0.2.11' }), { flag: 'wx' });
   const output = join(root, 'missing-parent', 'setup');
   const result = await packageSetup(portable, output);
   const zip = await readFile(result.zip);
