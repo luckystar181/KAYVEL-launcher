@@ -1,6 +1,6 @@
 {
   "name": "kayvel-launcher",
-  "version": "0.2.9",
+  "version": "0.2.10",
   "private": true,
   "type": "module",
   "main": "dist/main/main.js",
@@ -18,7 +18,6 @@
     "@xmcl/unzip": "2.1.2",
     "react": "^19.2.0",
     "react-dom": "^19.2.0",
-    "skinview3d": "^3.4.2",
     "undici": "6.29.1"
   },
   "devDependencies": {

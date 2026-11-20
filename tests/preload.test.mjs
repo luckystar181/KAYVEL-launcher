@@ -22,13 +22,11 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   ipcRenderer.invoke = (...args) => { calls.push(args); return Promise.resolve({}); };
   const api = await loadPreload(ipcRenderer);
   assert.deepEqual(Object.keys(api).sort(), [
-    'cancelDownload', 'checkLauncherUpdates', 'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder',
-    'playNeoForge', 'playVanilla', 'retryDownload', 'saveGameBest', 'saveLocalNickname', 'saveLocalSkin', 'saveMemoryMb', 'setModEnabled', 'status', 'updateLauncher', 'updateModpack', 'window'
+    'cancelDownload', 'checkLauncherUpdates', 'checkModpackUpdates', 'downloadAndPlay', 'gameBest', 'install', 'installNeoForge', 'installVanilla', 'localProfile', 'memorySettings', 'modSwitches', 'onGameExit', 'onPreparationProgress', 'openGameFolder', 'openGuideLink',
+    'playNeoForge', 'playVanilla', 'retryDownload', 'saveGameBest', 'saveLocalNickname', 'saveMemoryMb', 'setModEnabled', 'status', 'updateLauncher', 'updateModpack', 'window'
   ]);
   await api.localProfile();
   await api.saveLocalNickname('LocalPlayer');
-  const png = new Uint8Array([1, 2, 3]);
-  await api.saveLocalSkin(png, 'slim');
   await api.memorySettings();
   await api.saveMemoryMb(8192);
   await api.openGameFolder('ru');
@@ -37,10 +35,17 @@ test('preload exposes a local profile, not KAYVEL sign-in or account administrat
   await api.checkLauncherUpdates({ url: 'https://untrusted.invalid' });
   await api.updateLauncher('en', { signature: 'untrusted', bytes: 'untrusted' });
   assert.deepEqual(calls, [
-    ['kayvel:local-profile'], ['kayvel:local-nickname-save', 'LocalPlayer'], ['kayvel:local-skin-save', png, 'slim'],
+    ['kayvel:local-profile'], ['kayvel:local-nickname-save', 'LocalPlayer'],
     ['kayvel:memory-settings'], ['kayvel:memory-save', 8192], ['kayvel:open-game-folder', 'ru'],
     ['kayvel:modpack-check'], ['kayvel:modpack-update'], ['kayvel:launcher-check'], ['kayvel:launcher-update', 'en']
   ]);
+});
+
+test('preload exposes only a guide link identifier, not arbitrary browser options', async () => {
+  const calls = [];
+  const api = await loadPreload({ invoke: (...args) => { calls.push(args); return Promise.resolve({ ok: true }); } });
+  await api.openGuideLink('postimages', { url: 'file:///C:/untrusted', activate: false });
+  assert.deepEqual(calls, [['kayvel:open-guide-link', 'postimages']]);
 });
 
 test('preload forwards the complete game exit event and unsubscribes', async () => {

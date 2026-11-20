@@ -25,7 +25,7 @@ namespace KayvelSetup
 
         public void Validate()
         {
-            if (Version != "v0.2.9-v3S" || !Regex.IsMatch(Sha256 ?? "", "\\A[a-f0-9]{64}\\z") || Bytes < 1 || Bytes > 1000000000)
+            if (Version != "v0.2.10-v3S" || !Regex.IsMatch(Sha256 ?? "", "\\A[a-f0-9]{64}\\z") || Bytes < 1 || Bytes > 1000000000)
                 throw new InvalidDataException("Некорректные параметры установщика.");
             Uri uri = new Uri(Url, UriKind.Absolute);
             InstallerCore.ValidateUrl(uri);

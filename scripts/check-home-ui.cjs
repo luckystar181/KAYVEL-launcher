@@ -1,4 +1,4 @@
-const { app, BrowserWindow, session, nativeImage } = require('electron');
+const { app, BrowserWindow, session } = require('electron');
 const { mkdtempSync, writeFileSync, readFileSync } = require('node:fs');
 const { join, resolve } = require('node:path');
 const assert = require('node:assert/strict');
@@ -12,23 +12,6 @@ const phases = process.argv[3] ? [process.argv[3]] : ['ready', 'unavailable', 'd
 assert.ok(phases.every(phase => ['ready', 'unavailable', 'discovery', 'download', 'cancelling', 'error'].includes(phase)));
 const { version } = JSON.parse(readFileSync(join(__dirname, '../package.json'), 'utf8'));
 const preload = join(root, 'fixture-preload.cjs');
-const pixels = Buffer.alloc(64 * 64 * 4);
-function paint(x, y, width, height, [red, green, blue]) {
-  for (let row = y; row < y + height; row++) for (let column = x; column < x + width; column++) {
-    const offset = (row * 64 + column) * 4;
-    pixels.set([blue, green, red, 255], offset);
-  }
-}
-paint(0, 0, 32, 16, [180, 131, 101]);
-paint(16, 16, 24, 16, [157, 58, 89]);
-paint(40, 16, 16, 16, [180, 131, 101]);
-paint(32, 48, 16, 16, [180, 131, 101]);
-paint(0, 16, 16, 16, [49, 48, 65]);
-paint(16, 48, 16, 16, [49, 48, 65]);
-paint(8, 8, 8, 2, [46, 33, 31]);
-paint(9, 11, 2, 1, [35, 29, 38]);
-paint(13, 11, 2, 1, [35, 29, 38]);
-const skinBytes = [...nativeImage.createFromBitmap(pixels, { width: 64, height: 64 }).toPNG()];
 writeFileSync(preload, `
 const { contextBridge } = require('electron');
 const phase = process.argv.find(value => value.startsWith('--kayvel-ui-phase=')).split('=')[1];
@@ -38,12 +21,15 @@ const modpackUpdate = { state: ready ? 'current' : 'not-installed', installedVer
 const preparationProgress = ready ? null : { stage: phase === 'discovery' ? 'discovery' : phase === 'error' ? 'error' : 'minecraft', received: 123456789, total: phase === 'discovery' || phase === 'error' ? null : 345678901, completedFiles: 123, totalFiles: 456, file: phase === 'error' ? 'Соединение прервано / Connection interrupted. '.repeat(12) : 'libraries/net/minecraft/' + 'long-file-name-'.repeat(20) + '.jar' };
 const launcherUpdate = { state: phase === 'unavailable' ? 'unavailable' : 'available', installedVersion: '0.2.7', latestVersion: phase === 'unavailable' ? null : '0.2.8', message: '' };
 const status = { launcherUpdate, downloadActive: active, downloadCancelling: phase === 'cancelling', preparationIncomplete: !ready, releaseConfigured: true, gamePath: 'isolated-fixture', vanillaPath: 'isolated-fixture', vanillaReady: ready, preparingVanilla: active, neoforgeReady: ready, preparingNeoForge: false, gameRunning: false, installing: false, modSwitching: false, modpackUpdate, preparationProgress };
+const guideCalls = [];
 contextBridge.exposeInMainWorld('kayvel', {
+  openGuideLink: async id => { guideCalls.push(id); return { ok: id !== 'modrinth', message: '' }; },
+  guideCalls: async () => [...guideCalls],
   status: async () => status,
   checkLauncherUpdates: async () => launcherUpdate,
   checkModpackUpdates: async () => modpackUpdate,
   memorySettings: async () => ({ memoryMb: 4096, minMemoryMb: 2048, maxMemoryMb: 8192, totalMemoryMb: 16384 }),
-  localProfile: async () => ({ nickname: 'Discord_Name', skin: { model: 'classic', bytes: ${JSON.stringify(skinBytes)}, copyPath: 'isolated-synthetic-skin.png', copyReady: true } }),
+  localProfile: async () => ({ nickname: 'Discord_Name' }),
   gameBest: async () => 0,
   modSwitches: async () => [],
   onPreparationProgress: () => () => {},
@@ -91,14 +77,13 @@ app.whenReady().then(async () => {
           const label = document.querySelector('label[for="nickname"]');
           const style = getComputedStyle(hero);
           const control = document.querySelector('.download-controls button');
-          const skin = document.querySelector('.home-skin .skin-stage').getBoundingClientRect();
+          const brand = document.querySelector('.brand-display').getBoundingClientRect();
           const updates = document.querySelector('.home-updates');
-          resolve({ skinHeight: skin.height, skinInView: skin.top >= hero.getBoundingClientRect().top && skin.bottom <= hero.getBoundingClientRect().bottom, skinError: Boolean(document.querySelector('.skin-stage-error')), updatesCollapsed: !updates.open, updateNotice: updates.querySelector('summary').textContent, warning: Boolean(warning), launcherPanel: Boolean(document.querySelector('.launcher-update')), label: label.textContent, labelFits: label.scrollHeight <= label.clientHeight + 1, horizontalOverflow: document.documentElement.scrollWidth > innerWidth || hero.scrollWidth > hero.clientWidth, footer: document.querySelector('.footer-version').textContent, nickname: document.querySelector('#nickname').value, scrolling: hero.scrollHeight > hero.clientHeight, scrollbarColor: style.scrollbarColor, colorScheme: style.colorScheme, cancelVisible: Boolean(control), cancelDisabled: control?.disabled, progressVisible: Boolean(document.querySelector('.preparation-meter')), indeterminate: Boolean(document.querySelector('.preparation-track.indeterminate')), documentFits: document.documentElement.scrollHeight <= innerHeight });
+          resolve({ brandVisible: brand.height > 0, skinControls: Boolean(document.querySelector('input[type="file"], canvas, .skin-preview, .skin-upload')), updatesCollapsed: !updates.open, updateNotice: updates.querySelector('summary').textContent, warning: Boolean(warning), launcherPanel: Boolean(document.querySelector('.launcher-update')), label: label.textContent, labelFits: label.scrollHeight <= label.clientHeight + 1, horizontalOverflow: document.documentElement.scrollWidth > innerWidth || hero.scrollWidth > hero.clientWidth, footer: document.querySelector('.footer-version').textContent, nickname: document.querySelector('#nickname').value, scrolling: hero.scrollHeight > hero.clientHeight, scrollbarColor: style.scrollbarColor, colorScheme: style.colorScheme, cancelVisible: Boolean(control), cancelDisabled: control?.disabled, progressVisible: Boolean(document.querySelector('.preparation-meter')), indeterminate: Boolean(document.querySelector('.preparation-track.indeterminate')), documentFits: document.documentElement.scrollHeight <= innerHeight });
         })))`);
         assert.equal(result.warning, false);
-        assert.ok(result.skinHeight >= 228, 'Skin preview must have enough vertical space');
-        assert.ok(result.skinInView, 'Skin preview must be visible without scrolling');
-        assert.equal(result.skinError, false, 'Synthetic skin must render without errors');
+        assert.ok(result.brandVisible, 'Brand must remain visible');
+        assert.equal(result.skinControls, false, 'No local skin controls or preview should remain');
         assert.ok(result.updatesCollapsed, 'Update details must start collapsed');
         assert.ok(result.updateNotice.includes(phase === 'unavailable' ? (language === 'ru' ? 'Сборка и лаунчер' : 'Modpack and launcher') : (language === 'ru' ? 'Доступно обновление' : 'Update available')));
         assert.equal(result.launcherPanel, true);
@@ -155,7 +140,43 @@ app.whenReady().then(async () => {
         }
         if (width === 800 && ['ready', 'unavailable'].includes(phase)) writeFileSync(join(root, `home-${phase}-${language}-${width}x${height}-updates.png`), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
         await window.webContents.executeJavaScript(`document.querySelector('.home-updates summary').click(); document.querySelector('.hero').scrollTop = 0;`);
-        console.log(`PASS: ${phase} ${language} ${width}x${height}: skin, collapsed and expanded updates, nickname, progress, controls and layout`);
+        await window.webContents.executeJavaScript(`{ const trigger = document.querySelector('.top-tabs button[aria-haspopup="dialog"]'); trigger.focus(); trigger.click(); }`);
+        const guide = await window.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(() => {
+          const dialog = document.querySelector('.skin-guide');
+          const body = document.querySelector('.skin-guide-body');
+          const rect = dialog.getBoundingClientRect();
+          const nav = document.querySelector('.top-tabs').getBoundingClientRect();
+          const edition = document.querySelector('.edition').getBoundingClientRect();
+          resolve({ modal: dialog.matches(':modal'), title: document.querySelector('#skin-guide-title').textContent, focused: document.activeElement === dialog.querySelector('.game-close'), steps: dialog.querySelectorAll('li').length, fits: rect.top >= 0 && rect.bottom <= innerHeight && rect.left >= 0 && rect.right <= innerWidth, noOverflow: body.scrollWidth <= body.clientWidth && document.documentElement.scrollWidth <= innerWidth, navFits: nav.left >= edition.right, text: body.textContent, commands: [...dialog.querySelectorAll('code')].map(node => node.textContent) });
+        })))`);
+        assert.ok(guide.modal && guide.focused, 'Guide must be a modal with initial focus on close');
+        assert.ok(guide.fits && guide.noOverflow && guide.navFits, 'Guide and top navigation must fit every window size');
+        assert.equal(guide.steps, 4);
+        assert.equal(guide.title, language === 'ru' ? 'Как установить скин на сервере' : 'How to set your server skin');
+        assert.deepEqual(guide.commands, ['/skin set web classic "https://i.postimg.cc/XXXX/skin.png"', '/skin set web slim "https://i.postimg.cc/XXXX/skin.png"']);
+        assert.ok(guide.text.includes('Direct link'));
+        if (width === 800 || width === 1100) writeFileSync(join(root, `guide-${phase}-${language}-${width}x${height}.png`), (await window.webContents.capturePage()).toPNG(), { flag: 'wx' });
+        const guideBottom = await window.webContents.executeJavaScript(`new Promise(resolve => {
+          const body = document.querySelector('.skin-guide-body'); body.scrollTop = body.scrollHeight;
+          requestAnimationFrame(() => { const last = body.querySelector('.skin-guide-note').getBoundingClientRect(); const rect = body.getBoundingClientRect(); resolve(last.top >= rect.top && last.bottom <= rect.bottom + 1); });
+        })`);
+        assert.ok(guideBottom, 'Guide end must be reachable by scrolling');
+        if (phase === 'ready' && width === 800) {
+          for (const id of ['postimages', 'modrinth', 'commands']) await window.webContents.executeJavaScript(`document.querySelector('[data-guide-link="${id}"]').click()`);
+          const links = await window.webContents.executeJavaScript(`(async () => ({ calls: await window.kayvel.guideCalls(), error: Boolean(document.querySelector('.skin-guide [role="alert"]')) }))()`);
+          assert.deepEqual(links.calls.slice(-3), ['postimages', 'modrinth', 'commands']);
+          assert.equal(links.error, false);
+          await window.webContents.executeJavaScript(`document.querySelector('[data-guide-link="modrinth"]').click()`);
+          assert.ok(await window.webContents.executeJavaScript(`Boolean(document.querySelector('.skin-guide [role="alert"]'))`), 'Failed browser open must show a fallback message');
+        }
+        await window.webContents.executeJavaScript(`document.querySelector('.skin-guide .game-close').click()`);
+        assert.ok(await window.webContents.executeJavaScript(`!document.querySelector('.skin-guide') && document.activeElement === document.querySelector('.top-tabs button[aria-haspopup="dialog"]')`), 'Closing must restore focus to the guide entry');
+        await window.webContents.executeJavaScript(`document.querySelector('.top-tabs button[aria-haspopup="dialog"]').click()`);
+        window.webContents.sendInputEvent({ type: 'keyDown', keyCode: 'Escape' });
+        window.webContents.sendInputEvent({ type: 'keyUp', keyCode: 'Escape' });
+        await window.webContents.executeJavaScript(`new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))`);
+        assert.ok(await window.webContents.executeJavaScript(`!document.querySelector('.skin-guide')`), 'Escape must close the guide');
+        console.log(`PASS: ${phase} ${language} ${width}x${height}: home layout, guide, commands, scrolling, focus and Escape`);
       }
     }
     window.destroy();

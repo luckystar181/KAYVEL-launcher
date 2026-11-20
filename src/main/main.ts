@@ -1,6 +1,6 @@
 import { cancellationMessage, cancelDownload, checkDownloadCancelled, configureDownloadRequest, withDownloadSignal } from './download-session.js';
 import { createChromiumDownloadRequest } from './chromium-download.js';
-import { app, BrowserWindow, dialog, ipcMain, nativeImage, net, session, screen, shell } from 'electron';
+import { app, BrowserWindow, dialog, ipcMain, net, session, screen, shell } from 'electron';
 import { existsSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -16,7 +16,6 @@ import { requireAvailableJava21 } from './game-launch-policy.js';
 import { createMemorySettingsStore } from './memory-settings.js';
 import { gamePreparationUnavailable } from './game-preparation.js';
 import { createLocalProfileStore } from './local-profile.js';
-import { applyLocalSkin } from './game-skin.js';
 import { applyGameDefaults } from './game-defaults.js';
 import { createGameBestStore } from './game-best.js';
 import { instancePath, prepareInstance, preparedJava, verifyPreparation } from './prepare-instance.js';
@@ -36,11 +35,7 @@ let gameRunning = false;
 let modSwitching = false;
 let activeGamePath: string | null = null;
 const here = fileURLToPath(new URL('.', import.meta.url));
-const localProfile = createLocalProfileStore(app.getPath('userData'), bytes => {
-  const image = nativeImage.createFromBuffer(Buffer.from(bytes));
-  const size = image.getSize();
-  return !image.isEmpty() && size.width === 64 && (size.height === 32 || size.height === 64);
-});
+const localProfile = createLocalProfileStore(app.getPath('userData'));
 const memorySettings = createMemorySettingsStore(app.getPath('userData'));
 const localProfileReleaseReady = true;
 const gameBest = createGameBestStore(app.getPath('userData'));
@@ -277,6 +272,20 @@ ipcMain.handle('kayvel:status', (event) => {
 };
 });
 
+const guideLinks = {
+  postimages: 'https://postimages.org/',
+  modrinth: 'https://modrinth.com/mod/skinrestorer?g=1.21.1',
+  commands: 'https://github.com/Suiranoil/SkinRestorer/wiki/Commands'
+};
+ipcMain.handle('kayvel:open-guide-link', async (event, link: unknown) => {
+  if (!trusted(event)) throw new Error('Untrusted renderer');
+  if (typeof link !== 'string' || !Object.hasOwn(guideLinks, link)) throw new Error('Unknown guide link');
+  try {
+    await shell.openExternal(guideLinks[link as keyof typeof guideLinks]);
+    return { ok: true, message: '' };
+  } catch { return { ok: false, message: 'Could not open browser' }; }
+});
+
 ipcMain.handle('kayvel:open-game-folder', async (event, language: unknown) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
   const missing = language === 'en' ? 'The game folder has not been created yet. Download the modpack first.' : 'Папка игры ещё не создана. Сначала скачайте сборку.';
@@ -318,10 +327,6 @@ ipcMain.handle('kayvel:local-profile', (event) => {
 ipcMain.handle('kayvel:local-nickname-save', (event, nickname: unknown) => {
   if (!trusted(event)) throw new Error('Untrusted renderer');
   return localProfile.saveNickname(nickname);
-});
-ipcMain.handle('kayvel:local-skin-save', (event, bytes: unknown, model: unknown) => {
-  if (!trusted(event)) throw new Error('Untrusted renderer');
-  return localProfile.saveSkin(bytes, model);
 });
 
 ipcMain.handle('kayvel:mod-switches', async (event) => {
@@ -412,7 +417,6 @@ async function playPreparedNeoForge(language: unknown) {
     try { await withDownloadSignal(ffmpegController.signal, () => prepareFFmpeg(gamePath, reportPreparation)); }
     finally { downloadController = null; }
     ffmpegController.signal.throwIfAborted();
-    applyLocalSkin(gamePath, profile);
     applyGameDefaults(gamePath);
     const java = preparedJava(gamePath, app.getPath('userData'));
     stageProgress(reportPreparation, 'launch', 'Запуск Minecraft');

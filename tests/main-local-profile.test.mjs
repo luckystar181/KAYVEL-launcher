@@ -25,12 +25,12 @@ test('published local-profile release is configured without the historical Core 
   assert.ok(source.includes('const localProfileReleaseReady = true;'));
 });
 
-async function isolatedMain({ activateRelease = false, nickname = '', overrides = {}, confirm, openPath = async () => '', openInstaller = () => assert.fail('Unexpected installer process') } = {}) {
+async function isolatedMain({ activateRelease = false, nickname = '', overrides = {}, confirm, openPath = async () => '', openExternal = () => assert.fail('Unexpected external browser'), openInstaller = () => assert.fail('Unexpected installer process') } = {}) {
   const handlers = new Map();
   const sent = [];
   const sender = { setWindowOpenHandler() {}, on() {}, send: (...args) => sent.push(args) };
   const event = { sender };
-  const profile = { nickname, skin: null };
+  const profile = { nickname };
   const root = join('fictional-profile', 'launcher');
   let ready;
   let quits = 0;
@@ -38,7 +38,7 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
     './chromium-download.js': { createChromiumDownloadRequest: () => () => assert.fail('No live network in VM') },
     './download-session.js': { ...downloadSession, configureDownloadRequest() {} },
     electron: {
-      shell: { openPath },
+      shell: { openPath, openExternal },
       app: { getVersion: () => '0.2.7', getPath: () => root, quit: () => { quits++; }, whenReady: () => ({ then(callback) { ready = callback; } }), on() {} },
       BrowserWindow: class {
         webContents = sender;
@@ -47,7 +47,6 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
         isDestroyed() { return false; }
       },
       dialog: { showMessageBox: confirm ?? (() => { throw new Error('No game launch was authorized'); }) },
-      nativeImage: {},
       ipcMain: { handle: (channel, handler) => handlers.set(channel, handler), on() {} },
       session: { fromPartition: () => ({ setPermissionRequestHandler() {}, fetch: () => assert.fail('No live network in VM') }), defaultSession: { setPermissionRequestHandler() {}, webRequest: { onHeadersReceived() {} } } },
       screen: { getPrimaryDisplay: () => ({ workArea: { x: 0, y: 0, width: 1440, height: 820 } }) }
@@ -75,11 +74,9 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
       assert.equal(path, root);
       return {
         read: () => ({ ...profile }),
-        saveNickname: nickname => { profile.nickname = nickname; return { ...profile }; },
-        saveSkin: (bytes, model) => { profile.skin = { bytes: [...bytes], model }; return { ...profile }; }
+        saveNickname: nickname => { profile.nickname = nickname; return { ...profile }; }
       };
     } },
-    './game-skin.js': { applyLocalSkin: () => assert.fail('Unexpected skin application') },
     './game-defaults.js': { applyGameDefaults: () => assert.fail('Unexpected game defaults application') },
     './game-best.js': { createGameBestStore: () => ({ read: () => 0, save: score => score }) },
     './prepare-instance.js': { instancePath: path => join(path, 'instances', 'kayvel-1.21.1-neoforge-21.1.252-v3S') },
@@ -108,6 +105,23 @@ async function isolatedMain({ activateRelease = false, nickname = '', overrides 
   await ready();
   return { handlers, event, sent, quits: () => quits, invoke: (channel, ...args) => handlers.get(channel)(event, ...args) };
 }
+
+test('server skin guide opens only fixed documentation and hosting links for the trusted renderer', async () => {
+  const opened = [];
+  const main = await isolatedMain({ openExternal: async url => { opened.push(url); } });
+  assert.deepEqual(opened, []);
+  await assert.rejects(main.handlers.get('kayvel:open-guide-link')({ sender: {} }, 'postimages'), /Untrusted/);
+  for (const value of [undefined, null, {}, ['postimages'], '__proto__', 'constructor', 'toString', 'https://evil.invalid/', 'file:///C:/Windows/notepad.exe', 'javascript:alert(1)']) {
+    await assert.rejects(main.invoke('kayvel:open-guide-link', value), /Unknown guide link/);
+  }
+  assert.deepEqual(opened, []);
+  for (const id of ['postimages', 'modrinth', 'commands']) assert.equal((await main.invoke('kayvel:open-guide-link', id)).ok, true);
+  assert.deepEqual(opened, ['https://postimages.org/', 'https://modrinth.com/mod/skinrestorer?g=1.21.1', 'https://github.com/Suiranoil/SkinRestorer/wiki/Commands']);
+  const failing = await isolatedMain({ openExternal: async () => { throw new Error('Private browser details'); } });
+  const result = await failing.invoke('kayvel:open-guide-link', 'postimages');
+  assert.equal(result.ok, false);
+  assert.doesNotMatch(result.message, /Private browser details/);
+});
 
 function launcherModules({ version = '0.2.8', discover, stage } = {}) {
   const pack = { manifest: { version }, bytes: Buffer.from('fictional signed metadata'), signature: 'fictional signature' };
@@ -248,8 +262,8 @@ test('main registers local-profile operations but no KAYVEL account or remote sk
   const main = await isolatedMain();
   assert.deepEqual([...main.handlers.keys()].sort(), [
     'kayvel:cancel-download', 'kayvel:download-and-play', 'kayvel:game-best', 'kayvel:game-best-save', 'kayvel:install', 'kayvel:install-neoforge', 'kayvel:install-vanilla',
-    'kayvel:launcher-check', 'kayvel:launcher-update', 'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:local-skin-save', 'kayvel:memory-save', 'kayvel:memory-settings',
-    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:modpack-check', 'kayvel:modpack-update', 'kayvel:open-game-folder', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:retry-download', 'kayvel:status'
+    'kayvel:launcher-check', 'kayvel:launcher-update', 'kayvel:local-nickname-save', 'kayvel:local-profile', 'kayvel:memory-save', 'kayvel:memory-settings',
+    'kayvel:mod-switch-set', 'kayvel:mod-switches', 'kayvel:modpack-check', 'kayvel:modpack-update', 'kayvel:open-game-folder', 'kayvel:open-guide-link', 'kayvel:play-neoforge', 'kayvel:play-vanilla', 'kayvel:retry-download', 'kayvel:status'
   ]);
   const status = main.invoke('kayvel:status');
   assert.equal(Object.hasOwn(status, 'apiConfigured'), false);
@@ -301,12 +315,11 @@ test('game folder IPC reports missing folders and shell failures without creatin
   }
 });
 
-test('main saves nickname and skin through the local store without an account session', async () => {
+test('main saves only the nickname through the local store without an account session', async () => {
   const main = await isolatedMain();
-  assert.deepEqual(main.invoke('kayvel:local-profile'), { nickname: '', skin: null });
-  assert.equal(main.invoke('kayvel:local-nickname-save', 'LocalPlayer').nickname, 'LocalPlayer');
-  const profile = main.invoke('kayvel:local-skin-save', new Uint8Array([1, 2, 3]), 'slim');
-  assert.deepEqual(profile, { nickname: 'LocalPlayer', skin: { bytes: [1, 2, 3], model: 'slim' } });
+  assert.deepEqual(main.invoke('kayvel:local-profile'), { nickname: '' });
+  assert.deepEqual(main.invoke('kayvel:local-nickname-save', 'LocalPlayer'), { nickname: 'LocalPlayer' });
+  assert.equal(main.handlers.has('kayvel:local-skin-save'), false);
   assert.throws(() => main.handlers.get('kayvel:local-nickname-save')({ sender: {} }, 'OtherPlayer'), /Untrusted renderer/);
 });
 
@@ -548,11 +561,6 @@ async function launchFixture(launch) {
       ...dependencies,
       './installer.js': { acquireGameDirectoryLock: async () => { order.push('lock'); return async () => { order.push('unlock'); }; } },
       './game-process.js': { createGameExitReporter, watchLockedGame },
-      './game-skin.js': { applyLocalSkin: (path, profile) => {
-        order.push('skin');
-        assert.match(path, /instances/);
-        assert.equal(profile.nickname, 'LocalPlayer');
-      } },
       './neoforge.js': { ...dependencies['./neoforge.js'], launchNeoForge: async (path, name, java, observe, memoryMb) => {
         order.push('launch');
         assert.equal(memoryMb, main.invoke('kayvel:memory-settings').memoryMb);
@@ -584,7 +592,7 @@ test('successful one-click observes a fictional process and holds its lock until
   const result = await main.invoke('kayvel:download-and-play', 'en');
   assert.equal(result.ok, true);
   assert.equal(result.message, '');
-  assert.deepEqual(order, ['prepare', 'lock', 'verify', 'skin', 'java', 'launch']);
+  assert.deepEqual(order, ['prepare', 'lock', 'verify', 'java', 'launch']);
   assert.equal(main.invoke('kayvel:status').gameRunning, true);
   assert.equal(main.invoke('kayvel:status').preparingNeoForge, false);
   assert.equal(main.invoke('kayvel:status').preparationProgress, null);
@@ -627,49 +635,39 @@ test('missing process observation keeps the lock and blocks another launch after
   assert.equal(order.filter(step => step === 'launch').length, 1);
 });
 
-for (const failSkin of [false, true]) {
-  test(`skin application uses the launch profile snapshot under lock before Java; failure=${failSkin}`, async () => {
-    const order = [];
-    const selected = { nickname: 'LocalPlayer', skin: { model: 'slim', bytes: [1, 2, 3] } };
-    let current = selected;
-    const child = Object.assign(new EventEmitter(), { pid: 123, exitCode: null, signalCode: null });
-    const dependencies = preparedModules(async () => assert.fail('Direct launch does not prepare'), {
-      verifyPreparation: async () => { order.push('verify'); },
-      preparedJava: () => { order.push('java'); return 'fixture-java'; }
-    });
-    const main = await isolatedMain({ activateRelease: true, overrides: {
-      ...dependencies,
-      './local-profile.js': { createLocalProfileStore: () => ({ read: () => { order.push('profile'); return current; } }) },
-      './installer.js': { acquireGameDirectoryLock: async () => {
-        order.push('lock');
-        current = { nickname: 'NewPlayer', skin: null };
-        return async () => { order.push('unlock'); };
-      } },
-      './game-skin.js': { applyLocalSkin: (_path, profile) => {
-        order.push('skin');
-        assert.equal(profile, selected);
-        if (failSkin) throw new Error('fixture skin conflict');
-      } },
-      './game-process.js': { createGameExitReporter, watchLockedGame },
-      './neoforge.js': { ...dependencies['./neoforge.js'], launchNeoForge: async (_path, name, _java, observe) => {
-        order.push('launch');
-        assert.equal(name, selected.nickname);
-        observe(child);
-      } }
-    } });
-    const result = await main.invoke('kayvel:play-neoforge', 'ru');
-    assert.equal(result.ok, !failSkin);
-    assert.deepEqual(order, failSkin ? ['profile', 'lock', 'verify', 'skin', 'unlock'] : ['profile', 'lock', 'verify', 'skin', 'java', 'launch']);
-    assert.equal(main.invoke('kayvel:status').gameRunning, !failSkin);
-    if (failSkin) assert.match(result.message, /skin conflict/);
-    else {
-      assert.equal(result.message, '');
-      child.emit('exit', 0);
-      await new Promise(resolve => setImmediate(resolve));
-      assert.equal(order.at(-1), 'unlock');
-    }
+test('launch uses the nickname snapshot selected before acquiring the game lock', async () => {
+  const order = [];
+  const selected = { nickname: 'LocalPlayer' };
+  let current = selected;
+  const child = Object.assign(new EventEmitter(), { pid: 123, exitCode: null, signalCode: null });
+  const dependencies = preparedModules(async () => assert.fail('Direct launch does not prepare'), {
+    verifyPreparation: async () => { order.push('verify'); },
+    preparedJava: () => { order.push('java'); return 'fixture-java'; }
   });
-}
+  const main = await isolatedMain({ activateRelease: true, overrides: {
+    ...dependencies,
+    './local-profile.js': { createLocalProfileStore: () => ({ read: () => { order.push('profile'); return current; } }) },
+    './installer.js': { acquireGameDirectoryLock: async () => {
+      order.push('lock');
+      current = { nickname: 'NewPlayer' };
+      return async () => { order.push('unlock'); };
+    } },
+    './game-process.js': { createGameExitReporter, watchLockedGame },
+    './neoforge.js': { ...dependencies['./neoforge.js'], launchNeoForge: async (_path, name, _java, observe) => {
+      order.push('launch');
+      assert.equal(name, selected.nickname);
+      observe(child);
+    } }
+  } });
+  const result = await main.invoke('kayvel:play-neoforge', 'ru');
+  assert.equal(result.ok, true);
+  assert.deepEqual(order, ['profile', 'lock', 'verify', 'java', 'launch']);
+  assert.equal(main.invoke('kayvel:status').gameRunning, true);
+  assert.equal(result.message, '');
+  child.emit('exit', 0);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(order.at(-1), 'unlock');
+});
 
 for (const failDefaults of [false, true]) {
   test(`game defaults run under the verified game lock before Java; failure=${failDefaults}`, async () => {
@@ -682,7 +680,6 @@ for (const failDefaults of [false, true]) {
     const main = await isolatedMain({ activateRelease: true, nickname: 'LocalPlayer', overrides: {
       ...dependencies,
       './installer.js': { acquireGameDirectoryLock: async () => { order.push('lock'); return async () => { order.push('unlock'); }; } },
-      './game-skin.js': { applyLocalSkin: () => { order.push('skin'); } },
       './game-defaults.js': { applyGameDefaults: path => {
         order.push('defaults');
         assert.equal(path, join('fictional-profile', 'launcher', 'instances', 'fixture'));
@@ -693,7 +690,7 @@ for (const failDefaults of [false, true]) {
     } });
     const result = await main.invoke('kayvel:play-neoforge', 'ru');
     assert.equal(result.ok, !failDefaults);
-    assert.deepEqual(order, failDefaults ? ['lock', 'verify', 'skin', 'defaults', 'unlock'] : ['lock', 'verify', 'skin', 'defaults', 'java', 'launch']);
+    assert.deepEqual(order, failDefaults ? ['lock', 'verify', 'defaults', 'unlock'] : ['lock', 'verify', 'defaults', 'java', 'launch']);
     if (failDefaults) {
       assert.match(result.message, /defaults conflict/);
       assert.equal(main.invoke('kayvel:status').gameRunning, false);

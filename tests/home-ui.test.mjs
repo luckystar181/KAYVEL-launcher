@@ -33,7 +33,7 @@ test('home content keeps usable dark scrollbars during first download in small w
   assert.doesNotMatch(style, /\.hero(?:::-webkit-scrollbar)?\{[^}]*(?:overflow(?:-y)?:hidden|scrollbar-width:none|display:none)/);
 });
 
-test('home emphasizes the skin and keeps update details collapsed without hiding progress', () => {
+test('home keeps a single-column brand and update details collapsed without hiding progress', () => {
   assert.match(source, /<details className=\{`home-updates/);
   const details = source.slice(source.indexOf('<details className={`home-updates'), source.indexOf('</details>'));
   assert.doesNotMatch(details, /\bopen[= >]/);
@@ -42,7 +42,8 @@ test('home emphasizes the skin and keeps update details collapsed without hiding
   assert.match(details, /<LauncherUpdatePanel/);
   assert.doesNotMatch(details, /PreparationMeter|download-controls/);
   assert.match(source, /updateAvailable = status\?\.modpackUpdate.state === 'available' \|\| status\?\.launcherUpdate.state === 'available'/);
-  assert.match(style, /\.home-skin \.skin-stage\{min-height:228px/);
+  assert.match(style, /\.home-showcase\{[^}]*grid-template-columns:minmax\(0,1fr\)/);
+  assert.doesNotMatch(source + style, /saveLocalSkin|applyLocalSkin|skin-preview|skin-upload|input\[type="file"\]|canvas/i);
   assert.doesNotMatch(source, /brand-diamond|Java → Minecraft → NeoForge/);
 });
 

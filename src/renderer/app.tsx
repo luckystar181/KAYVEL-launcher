@@ -1,13 +1,12 @@
 import React, { useEffect, useState } from 'react';
 import { PreparationMeter } from './preparation-meter';
+import { SkinGuide } from './skin-guide';
 import { LauncherUpdatePanel } from './launcher-update-panel';
 import type { LauncherUpdateStatus } from '../main/launcher-update-status';
 import { ModpackUpdatePanel } from './modpack-update-panel';
 import type { ModpackUpdateStatus } from '../main/modpack-update-status';
 import { watchLauncherStatus } from './launcher-status';
 import type { PreparationProgress } from '../main/preparation-progress';
-import { SkinPreview3D } from './skin-preview-3d';
-import { SkinHead } from './skin-head';
 import { createRoot } from 'react-dom/client';
 import './style.css';
 
@@ -15,7 +14,7 @@ type MemorySettings = { memoryMb: number; minMemoryMb: number; maxMemoryMb: numb
 type Status = { downloadActive: boolean; downloadCancelling: boolean; preparationIncomplete: boolean; releaseConfigured: boolean; gamePath: string; vanillaPath: string; vanillaReady: boolean; preparingVanilla: boolean; neoforgeReady: boolean; preparingNeoForge: boolean; gameRunning: boolean; installing: boolean; modSwitching: boolean; launcherUpdate: LauncherUpdateStatus; modpackUpdate: ModpackUpdateStatus; preparationProgress: PreparationProgress | null };
 type Result = { ok: boolean; message: string };
 type GameExit = { code: number | null; gamePath: string };
-type LocalProfile = { nickname: string; skin: { model: 'classic' | 'slim'; bytes: number[]; copyPath: string; copyReady: boolean } | null };
+type LocalProfile = { nickname: string };
 type ModId = 'iris' | 'distantHorizons' | 'ssrd';
 type ModSwitch = { id: ModId; state: 'enabled' | 'disabled' | 'unavailable' | 'conflict'; message?: string };
 const modLabels: Record<ModId, string> = { iris: 'Iris', distantHorizons: 'Distant Horizons', ssrd: 'Separate Sable Render Distance' };
@@ -27,12 +26,12 @@ declare global {
       updateLauncher(language: 'ru' | 'en'): Promise<Result>;
       checkModpackUpdates(): Promise<ModpackUpdateStatus>;
       updateModpack(): Promise<Result>;
+      openGuideLink(link: 'postimages' | 'modrinth' | 'commands'): Promise<Result>;
       openGameFolder(language: 'ru' | 'en'): Promise<Result>;
       memorySettings(): Promise<MemorySettings>;
       saveMemoryMb(memoryMb: number): Promise<MemorySettings>;
       localProfile(): Promise<LocalProfile>;
       saveLocalNickname(nickname: string): Promise<LocalProfile>;
-      saveLocalSkin(bytes: Uint8Array, model: 'classic' | 'slim'): Promise<LocalProfile>;
       gameBest(): Promise<number>;
       saveGameBest(score: number): Promise<number>;
       modSwitches(): Promise<ModSwitch[]>;
@@ -56,7 +55,7 @@ const strings = {
     description: 'Пространство для своей команды. Всё необходимое - в одном месте.',
     install: 'УСТ. МОДПАК', play: 'ИГРАТЬ', settings: 'Настройки',
     preparing: 'Подготовка файлов…', noRelease: 'Сборка ещё не опубликована',
-    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.9 · v3S',
+    downloadReady: 'Подписанный релиз доступен для установки файлов модпака', version: 'Версия лаунчера 0.2.10 · v3S',
     language: 'Язык', back: 'Назад', gameFolder: 'Папка Minecraft с модами',
     stage: 'СОСТОЯНИЕ ПРОЕКТА', pack: 'Модпак', game: 'Minecraft',
     soon: 'В разработке', waiting: 'Ожидает публикации', available: 'Подписанный релиз настроен',
@@ -65,14 +64,14 @@ const strings = {
     profile: 'Профиль', nickname: 'Ник, который вам установили на Discord-сервере',
     vanillaReady: 'Установлено', vanillaWaiting: 'Не установлена', running: 'Игра запущена',
     noJava: 'Java 21 не найдена; автоматическая загрузка отключена', preparationBlocked: 'Подготовка Minecraft и NeoForge временно отключена: загрузчики ещё не проверены на сохранность файлов и отсутствие повторов.', neoInstall: 'NEOFORGE НЕДОСТУПЕН', neoPlay: 'ЗАПУСТИТЬ NEOFORGE', neoReady: 'Установлено', neoWaiting: 'Не установлен', neoHint: 'Модпак устанавливается отдельно. Локальный запуск не подтверждает допуск на сервер.',
-    gameSection: 'Мини-игра', gameTitle: 'Ударь Паспартама', gameHint: 'Поймай Паспартама за 30 секунд: нажимай на появляющуюся цель и побей свой рекорд.', gameCell: 'Паспартам', gameScore: 'СЧЁТ', gameBest: 'РЕКОРД', gameSoon: 'Скоро', gamePlay: 'ИГРАТЬ', skinPreview: 'Предпросмотр скина', chooseSkin: 'Загрузить PNG', skinPreviewHint: 'PNG 64×64 или 64×32, до 1 MiB.'
+    gameSection: 'Мини-игра', gameTitle: 'Ударь Паспартама', gameHint: 'Поймай Паспартама за 30 секунд: нажимай на появляющуюся цель и побей свой рекорд.', gameCell: 'Паспартам', gameScore: 'СЧЁТ', gameBest: 'РЕКОРД', gameSoon: 'Скоро', gamePlay: 'ИГРАТЬ'
   },
   en: {
     subtitle: 'Private server · Minecraft Java Edition 1.21.1 · NeoForge',
     description: 'A place for your team. Everything you need in one place.',
     install: 'INSTALL', play: 'PLAY', settings: 'Settings',
     preparing: 'Preparing files…', noRelease: 'No modpack release has been published',
-    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.9 · v3S',
+    downloadReady: 'A signed modpack release is available for file installation', version: 'Launcher 0.2.10 · v3S',
     language: 'Language', back: 'Back', gameFolder: 'Modded Minecraft folder',
     stage: 'PROJECT STATUS', pack: 'Modpack', game: 'Minecraft',
     soon: 'In development', waiting: 'Awaiting release', available: 'Signed release configured',
@@ -81,7 +80,7 @@ const strings = {
     profile: 'Profile', nickname: 'Nickname assigned to you on the Discord server',
     vanillaReady: 'Installed', vanillaWaiting: 'Not installed', running: 'Game running',
     noJava: 'Java 21 was not found; automatic download is disabled', preparationBlocked: 'Minecraft and NeoForge preparation is temporarily disabled: the downloaders have not yet been verified to preserve existing files and avoid retries.', neoInstall: 'NEOFORGE UNAVAILABLE', neoPlay: 'LAUNCH NEOFORGE', neoReady: 'Installed', neoWaiting: 'Not installed', neoHint: 'The modpack is installed separately. Local launch does not grant server access.',
-    gameSection: 'Mini-game', gameTitle: 'Hit Passepartout', gameHint: 'Catch Passepartout in 30 seconds: tap the target and beat your best score.', gameCell: 'Passepartout', gameScore: 'SCORE', gameBest: 'BEST', gameSoon: 'Coming soon', gamePlay: 'PLAY', skinPreview: 'Skin preview', chooseSkin: 'Upload PNG', skinPreviewHint: 'PNG 64×64 or 64×32, up to 1 MiB.'
+    gameSection: 'Mini-game', gameTitle: 'Hit Passepartout', gameHint: 'Catch Passepartout in 30 seconds: tap the target and beat your best score.', gameCell: 'Passepartout', gameScore: 'SCORE', gameBest: 'BEST', gameSoon: 'Coming soon', gamePlay: 'PLAY'
   }
 };
 
@@ -112,13 +111,8 @@ function App() {
   const [nickname, setNickname] = useState('');
   const [savedNickname, setSavedNickname] = useState('');
   const [profileReady, setProfileReady] = useState(false);
-  const [localSkin, setLocalSkin] = useState<LocalProfile['skin']>(null);
-  const [skinModel, setSkinModel] = useState<'classic' | 'slim'>('classic');
-  const [skinFile, setSkinFile] = useState<File | null>(null);
-  const [skinMessage, setSkinMessage] = useState('');
-  const [skinHeadFile, setSkinHeadFile] = useState<File | null>(null);
   const [gameOpen, setGameOpen] = useState(false);
-  const [skinOpen, setSkinOpen] = useState(false);
+  const [skinGuideOpen, setSkinGuideOpen] = useState(false);
   const [gameTime, setGameTime] = useState(0);
   const [gameTarget, setGameTarget] = useState(5);
   const [gameScore, setGameScore] = useState(0);
@@ -151,12 +145,6 @@ function App() {
     window.addEventListener('keydown', onKeyDown);
     return () => window.removeEventListener('keydown', onKeyDown);
   }, [gameOpen]);
-  useEffect(() => {
-    if (!skinOpen) return;
-    const onKeyDown = (event: KeyboardEvent) => { if (event.key === 'Escape') setSkinOpen(false); };
-    window.addEventListener('keydown', onKeyDown);
-    return () => window.removeEventListener('keydown', onKeyDown);
-  }, [skinOpen]);
   function hitTarget() {
     if (gameTime <= 0 || !gameBestReady) return;
     const next = gameScore + 1;
@@ -175,9 +163,6 @@ function App() {
   function showLocalProfile(profile: LocalProfile) {
     setNickname(profile.nickname);
     setSavedNickname(profile.nickname);
-    setLocalSkin(profile.skin);
-    setSkinHeadFile(profile.skin ? new File([new Uint8Array(profile.skin.bytes)], `${profile.nickname}.png`, { type: 'image/png' }) : null);
-    if (profile.skin) setSkinModel(profile.skin.model);
   }
   useEffect(() => {
     let active = true;
@@ -203,24 +188,6 @@ function App() {
       setMessage(lang === 'ru' ? 'Ник сохранён на этом компьютере. Смена ника может изменить игровую личность и доступ к вещам.' : 'Name saved locally. Changing it can change your in-game identity and inventory.');
     } catch (error) {
       setMessage(error instanceof Error ? error.message : 'Не удалось сохранить ник.');
-    } finally { setBusy(false); }
-  }
-  async function saveSkinLocally() {
-    const selected = skinFile ?? skinHeadFile;
-    if (!selected || !savedNickname || nickname !== savedNickname) return;
-    setBusy(true);
-    try {
-      if (selected.size > 1_048_576) throw new Error('Выберите PNG размером не более 1 MiB.');
-      const image = await createImageBitmap(selected);
-      const valid = image.width === 64 && (image.height === 64 || image.height === 32);
-      image.close();
-      if (!valid) throw new Error('Нужен PNG 64×64 или 64×32.');
-      const profile = await window.kayvel.saveLocalSkin(new Uint8Array(await selected.arrayBuffer()), skinModel);
-      showLocalProfile(profile);
-      setSkinFile(null);
-      setSkinMessage(lang === 'ru' ? 'Копия сохранена. Скин применится при следующем запуске сборки. Видимость другим игрокам не гарантируется.' : 'Copy saved. The skin will be applied the next time you launch the modpack. Other players may not see it.');
-    } catch (error) {
-      setSkinMessage(error instanceof Error ? error.message : 'Не удалось сохранить скин.');
     } finally { setBusy(false); }
   }
   async function refreshModSwitches() {
@@ -348,7 +315,7 @@ function App() {
       </div>
     </header>
     <main>
-      <div className="topline"><span className="edition">MINECRAFT 1.21.1 <span className="divider">/</span> NEOFORGE</span><nav className="top-tabs" aria-label={lang === 'ru' ? 'Разделы' : 'Sections'}><button className={skinOpen ? 'active' : ''} onClick={() => { setSkinOpen(true); setGameOpen(false); }}>{lang === 'ru' ? 'Скин' : 'Skin'}</button><button className={gameOpen ? 'active' : ''} onClick={() => { setGameOpen(true); setSkinOpen(false); }}>{lang === 'ru' ? 'Мини-игра' : 'Mini-game'}</button></nav><button className="settings" onClick={toggleSettings} aria-label={t.settings} title={t.settings}>⚙</button></div>
+      <div className="topline"><span className="edition">MINECRAFT 1.21.1 <span className="divider">/</span> NEOFORGE</span><nav className="top-tabs" aria-label={lang === 'ru' ? 'Разделы' : 'Sections'}><button className={skinGuideOpen ? 'active' : ''} aria-haspopup="dialog" onClick={() => { setGameOpen(false); setSkinGuideOpen(true); }}>{lang === 'ru' ? 'Гайд по скину' : 'Skin guide'}</button><button className={gameOpen ? 'active' : ''} onClick={() => { setSkinGuideOpen(false); setGameOpen(true); }}>{lang === 'ru' ? 'Мини-игра' : 'Mini-game'}</button></nav><button className="settings" onClick={toggleSettings} aria-label={t.settings} title={t.settings}>⚙</button></div>
       {settings ? <section className="settings-panel"><span className="eyebrow">KAYVEL / {t.settings.toUpperCase()}</span><h1>{t.settings}</h1><label htmlFor="language">{t.language}</label><select id="language" value={lang} onChange={event => setLang(event.target.value as 'ru' | 'en')}><option value="ru">Русский</option><option value="en">English</option></select><div className="path-block"><div className="path-block-heading"><span className="eyebrow">{t.gameFolder}</span><button type="button" className="open-game-folder" disabled={!status || openingFolder} onClick={() => void openGameFolder()}>{lang === 'ru' ? 'Открыть папку' : 'Open folder'}</button></div><code>{status?.gamePath ?? '…'}</code><p>{t.pathHint}</p><p role="status">{folderMessage}</p></div>
       <section className="memory-settings" aria-labelledby="memory-heading"><h2 id="memory-heading">{lang === 'ru' ? 'Оперативная память' : 'Memory'}</h2><label htmlFor="memory-mb">{lang === 'ru' ? 'ОЗУ для Minecraft' : 'RAM for Minecraft'}</label><select id="memory-mb" value={memory?.memoryMb ?? ''} disabled={!memory || memorySaving || busy || !status || status.gameRunning || status.preparingNeoForge || status.preparingVanilla || status.installing || status.modSwitching} onChange={event => void changeMemory(Number(event.target.value))}>{!memory && <option value="">…</option>}{memory && Array.from({ length: (memory.maxMemoryMb - memory.minMemoryMb) / 512 + 1 }, (_, index) => memory.minMemoryMb + index * 512).map(value => <option key={value} value={value}>{value / 1024} {lang === 'ru' ? 'ГБ' : 'GB'}</option>)}</select><p>{memory && (lang === 'ru' ? `На компьютере ${(memory.totalMemoryMb / 1024).toFixed(1)} ГБ · для игры доступно до ${memory.maxMemoryMb / 1024} ГБ. Рекомендуется 3–4 ГБ для этой сборки, если хватает памяти.` : `System RAM: ${(memory.totalMemoryMb / 1024).toFixed(1)} GB · up to ${memory.maxMemoryMb / 1024} GB for the game. 3–4 GB is recommended for this modpack if available.`)}</p><p role="status">{memoryMessage}</p></section>
       <section className="mod-settings" aria-labelledby="mods-heading">
@@ -366,12 +333,12 @@ function App() {
       <button className="text-button" onClick={toggleSettings}>← {t.back}</button></section> :
       <section className="hero">
         <section className="profile-strip">
-          <div className="profile-intro"><SkinHead file={skinHeadFile} label={lang === 'ru' ? 'Голова выбранного скина' : 'Selected skin head'} /><div><span className="eyebrow">{t.profile}</span><strong>{savedNickname || (lang === 'ru' ? 'Укажите ник' : 'Choose a name')}</strong></div></div>
+          <div className="profile-intro"><div><span className="eyebrow">{t.profile}</span><strong>{savedNickname || (lang === 'ru' ? 'Укажите ник' : 'Choose a name')}</strong></div></div>
           <div className="local-test"><label htmlFor="nickname">{t.nickname}</label><input id="nickname" value={nickname} disabled={!profileReady || busy} maxLength={16} placeholder="Player_123" autoComplete="off" onChange={event => setNickname(event.target.value)} /><button disabled={!profileReady || busy || nickname === savedNickname || !/^[A-Za-z0-9_]{3,16}$/.test(nickname)} onClick={() => void saveNickname()}>{lang === 'ru' ? 'Сохранить ник' : 'Save name'}</button></div>
         </section>
         <div className="home-grid">
           <section className="identity-panel">
-            <div className="home-showcase"><div className="brand-display"><span className="eyebrow">MINECRAFT JAVA EDITION</span><h1>KAYVEL</h1><p>{lang === 'ru' ? 'Твоя команда. Твой мир.' : 'Your team. Your world.'}</p></div><section className="home-skin" aria-label={lang === 'ru' ? 'Скин на главном экране' : 'Skin on home screen'}><div className="home-skin-heading"><span className="eyebrow">{savedNickname || t.profile}</span><button type="button" onClick={() => { setSkinOpen(true); setGameOpen(false); }}>{lang === 'ru' ? 'Изменить скин' : 'Change skin'}</button></div>{!skinOpen && <SkinPreview3D file={skinFile ?? skinHeadFile} model={skinModel} lang={lang} />}</section></div>
+            <div className="home-showcase"><div className="brand-display"><span className="eyebrow">MINECRAFT JAVA EDITION</span><h1>KAYVEL</h1><p>{lang === 'ru' ? 'Твоя команда. Твой мир.' : 'Your team. Your world.'}</p></div></div>
           </section>
         </div>
         <div className="launch-bar">
@@ -388,18 +355,7 @@ function App() {
         </details>
         {progress && !status?.gameRunning && <PreparationMeter progress={progress} lang={lang} />}
       </section>}
- {skinOpen && !settings && <div className="game-overlay" onMouseDown={event => { if (event.target === event.currentTarget) setSkinOpen(false); }}><section className="skin-dialog" role="dialog" aria-modal="true" aria-label={t.skinPreview}>
-        <div className="game-dialog-head"><div><span className="eyebrow">KAYVEL / {lang === 'ru' ? 'СКИН' : 'SKIN'}</span><h2>{t.skinPreview}</h2></div><button className="game-close" aria-label={t.back} onClick={() => setSkinOpen(false)}>×</button></div>
-        <div className="skin-dialog-body"><div className="skin-viewer"><SkinPreview3D file={skinFile ?? skinHeadFile} model={skinModel} lang={lang} /><span>{lang === 'ru' ? 'Перетащите мышью для вращения · колёсико для масштаба' : 'Drag to rotate · scroll to zoom'}</span></div>
-          <div className="skin-panel skin-controls"><strong>{skinFile?.name || (localSkin ? `${savedNickname}.png · ${localSkin.model}` : t.skinPreviewHint)}</strong>
-            <div className="skin-actions"><label className="skin-upload">{t.chooseSkin}<input type="file" accept="image/png" disabled={busy} onChange={event => { setSkinFile(event.currentTarget.files?.[0] ?? null); event.currentTarget.value = ''; setSkinMessage(''); }} /></label></div>
-            <div className="skin-meta"><label htmlFor="skin-model">{lang === 'ru' ? 'Модель' : 'Model'}</label><select id="skin-model" disabled={busy} value={skinModel} onChange={event => setSkinModel(event.target.value as 'classic' | 'slim')}><option value="classic">Classic</option><option value="slim">Slim</option></select></div>
-            <button className="skin-submit" disabled={!profileReady || busy || !savedNickname || nickname !== savedNickname || (!skinFile && (!localSkin || (skinModel === localSkin.model && localSkin.copyReady)))} onClick={() => void saveSkinLocally()}>{localSkin ? (lang === 'ru' ? 'Сохранить изменения' : 'Save changes') : (lang === 'ru' ? 'Сохранить скин' : 'Save skin')}</button>
-            <p className="skin-note">{lang === 'ru' ? 'Сначала сохраните ник. Выбранный PNG применяется локально при следующем запуске сборки через CustomSkinLoader. Скин не загружается на сторонние сайты; другие игроки могут его не видеть.' : 'Save your name first. Your PNG is applied locally through CustomSkinLoader the next time you launch the modpack. It is not uploaded to third-party sites; other players may not see it.'}</p>
-            {localSkin && <div className="skin-copy-path"><span>{localSkin.copyReady ? (lang === 'ru' ? 'Копия PNG:' : 'PNG copy:') : (lang === 'ru' ? 'Копия отсутствует или изменена извне:' : 'Copy is missing or changed externally:')}</span><code>{localSkin.copyPath}</code></div>}
-            <p className="skin-note" role="status">{skinMessage}</p>
-          </div></div>
-      </section></div>}
+      {skinGuideOpen && <SkinGuide lang={lang} onClose={() => setSkinGuideOpen(false)} />}
       {gameOpen && !settings && <div className="game-overlay" onMouseDown={event => { if (event.target === event.currentTarget) setGameOpen(false); }}><section className="game-dialog" role="dialog" aria-modal="true" aria-label={t.gameTitle}>
         <div className="game-dialog-head"><div><span className="eyebrow">{t.gameSection} / KAYVEL</span><h2>{t.gameTitle}</h2></div><button className="game-close" aria-label={t.back} onClick={() => setGameOpen(false)}>×</button></div>
         <div className="game-info"><span>{t.gameScore}<strong>{gameScore}</strong></span><span>{t.gameBest}<strong>{gameBest}</strong></span><span>{lang === 'ru' ? 'ВРЕМЯ' : 'TIME'}<strong>{gameTime}с</strong></span></div>

@@ -7,7 +7,6 @@ import { acquireGameDirectoryLock, getInstalledManifest, withInstallationLock } 
 import { verifyPreparation, prepareInstance } from '../dist/main/prepare-instance.js';
 import { readModSwitches, setModEnabled } from '../dist/main/mod-switches.js';
 import { writeNewFile } from '../dist/main/install-files.js';
-import { applyLocalSkin, localSkinTemplate } from '../dist/main/game-skin.js';
 import { applyGameDefaults } from '../dist/main/game-defaults.js';
 import { signedPack, preparedFixture, pinnedUrl, publicKey, mockDownloads, stopped, optionalMod } from './helpers/modpack-fixture.mjs';
 
@@ -50,40 +49,54 @@ test('update downloads only differences, backs up managed changes, and preserves
   assert.equal(calls.length, 2, 'an already updated instance must not download or downgrade to the pin');
 });
 
-test('signed CSL seed installs and updates independently of mutable config and named PNGs', async t => {
-  const seedPath = 'kubejs/config/kayvel-customskinloader.json';
-  const seed = await readFile(new URL('../modpack/kubejs/config/kayvel-customskinloader.json', import.meta.url), 'utf8');
-  const old = signedPack('v0.2.0-v3S', { 'mods/fixture.jar': 'same', [seedPath]: JSON.stringify(localSkinTemplate) });
-  const { root } = await preparedFixture(t, old);
-  const release = await acquireGameDirectoryLock(root);
-  try { applyLocalSkin(root, { nickname: 'LocalPlayer', skin: null }); }
-  finally { await release(); }
-  const configPath = join(root, 'CustomSkinLoader/CustomSkinLoader.json');
-  const config = JSON.parse(await readFile(configPath, 'utf8'));
-  assert.deepEqual(config.loadlist, localSkinTemplate.loadlist);
-  config.version = '15.1';
-  config.buildNumber = 999;
-  config.loadlist[1].checkPNG = false;
-  const rewritten = JSON.stringify(config, null, 4);
-  await writeFile(configPath, rewritten);
-  await writeNewFile(root, 'CustomSkinLoader/LocalSkin/skins/OtherPlayer.png', 'personal PNG never executed');
-  await verifyPreparation(root, publicKey);
-  const next = signedPack('v0.2.1-v3S', { 'mods/fixture.jar': 'same', [seedPath]: seed, 'mods/freecam-fixture.jar': 'fictional mod never executed' });
+const removedSkinFiles = {
+  'mods/offlineskins-1.21.1-v1a-neoforge.jar': 'offline skin fixture',
+  'mods/CustomSkinLoader_Universal-15.1.jar': 'custom skin fixture',
+  'kubejs/config/kayvel-customskinloader.json': '{"loadlist":[]}'
+};
+
+test('removing client skin mods backs up exactly the managed files without touching personal textures or profiles', async t => {
+  const keep = { 'mods/fixture.jar': 'same' };
+  const old = signedPack('v0.2.3-v3S', { ...keep, ...removedSkinFiles });
+  const { root, userData } = await preparedFixture(t, old);
+  const personal = ['CustomSkinLoader/CustomSkinLoader.json', 'CustomSkinLoader/LocalSkin/skins/LocalPlayer.png', 'CustomSkinLoader/KAYVEL-Local-v2/history/old.json', 'OfflineSkins/LocalPlayer.png', 'saves/world/level.dat', 'servers.dat', 'options.txt'];
+  for (const path of personal) await writeNewFile(root, path, 'personal: ' + path);
+  await writeNewFile(userData, 'local-player/profile.json', 'legacy profile bytes');
+  await writeNewFile(userData, 'local-player/skin-copies/old/LocalPlayer.png', 'legacy PNG');
+  const next = signedPack('v0.2.4-v3S', keep);
   const calls = mockDownloads(t, next);
-  await update(root, next);
-  assert.equal(calls.length, 2);
-  assert.equal(await text(root, seedPath), seed);
-  assert.equal(await readFile(configPath, 'utf8'), rewritten);
-  const releaseNext = await acquireGameDirectoryLock(root);
-  try { applyLocalSkin(root, { nickname: 'LocalPlayer', skin: null }); }
-  finally { await releaseNext(); }
-  assert.equal(await readFile(configPath, 'utf8'), rewritten);
-  assert.equal(await text(root, 'CustomSkinLoader/LocalSkin/skins/OtherPlayer.png'), 'personal PNG never executed');
+  const result = await update(root, next);
+  assert.equal(calls.length, 0, 'removal-only delta needs no managed file downloads');
+  const transaction = JSON.parse(await readFile(join(result.backup, 'transaction.json'), 'utf8'));
+  assert.deepEqual(transaction.changes.map(change => change.path).sort(), Object.keys(removedSkinFiles).sort());
+  for (const change of transaction.changes) {
+    await absent(root, change.path);
+    assert.equal(await readFile(join(result.backup, change.backup), 'utf8'), removedSkinFiles[change.path]);
+  }
+  for (const path of personal) assert.equal(await text(root, path), 'personal: ' + path);
+  assert.equal(await text(userData, 'local-player/profile.json'), 'legacy profile bytes');
+  assert.equal(await text(userData, 'local-player/skin-copies/old/LocalPlayer.png'), 'legacy PNG');
   await verifyPreparation(root, publicKey);
-  await writeFile(join(root, seedPath), seed + ' ');
-  await assert.rejects(verifyPreparation(root, publicKey));
-  assert.equal(await readFile(configPath, 'utf8'), rewritten);
+  assert.equal((await getInstalledManifest(join(root, '.kayvel'), publicKey)).manifest.buildVersion, 'v0.2.4-v3S');
+  await update(root, next);
+  assert.equal(calls.length, 0);
 });
+
+for (const path of Object.keys(removedSkinFiles)) {
+  test(`a modified managed skin file blocks removal and preserves all originals: ${path}`, async t => {
+    const keep = { 'mods/fixture.jar': 'same' };
+    const old = signedPack('v0.2.3-v3S', { ...keep, ...removedSkinFiles });
+    const { root } = await preparedFixture(t, old);
+    await writeFile(join(root, path), 'externally modified');
+    const next = signedPack('v0.2.4-v3S', keep);
+    const calls = mockDownloads(t, next);
+    await assert.rejects(update(root, next));
+    assert.equal(calls.length, 0);
+    for (const [name, bytes] of Object.entries(removedSkinFiles)) assert.equal(await text(root, name), name === path ? 'externally modified' : bytes);
+    assert.equal((await getInstalledManifest(join(root, '.kayvel'), publicKey)).manifest.buildVersion, 'v0.2.3-v3S');
+    await absent(root, '.kayvel/update-incomplete.json');
+  });
+}
 
 test('one-time key and server defaults preserve preparation verification and player choices across signed updates', async t => {
   const { root } = await preparedFixture(t);

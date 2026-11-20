@@ -38,6 +38,17 @@ test('portable main collection rejects direct and transitive historical account 
   await assert.rejects(launcherMainFiles(source), /Historical account module/);
 }));
 
+test('portable main collection rejects direct and transitive removed skin dependencies', async () => fixture(async ({ source, destination }) => {
+  for (const name of ['game-skin.js', 'minecraft-skin.js']) {
+    await writeFile(join(source, 'value.js'), `import './${name}';\n`);
+    await assert.rejects(copyLauncherMain(source, destination), /Removed skin module/);
+    await assert.rejects(readdir(destination), { code: 'ENOENT' });
+    await writeFile(join(source, 'main.js'), `import './${name}';\n`);
+    await assert.rejects(launcherMainFiles(source), /Removed skin module/);
+    await writeFile(join(source, 'main.js'), "import './profile.js';\n");
+  }
+}));
+
 test('portable main collection follows literal dynamic imports and preload require dependencies', async () => fixture(async ({ source }) => {
   await writeFile(join(source, 'main.js'), "export const load = () => import('./profile.js');\n");
   await writeFile(join(source, 'preload.cjs'), "require('./preload-helper.cjs');\n");

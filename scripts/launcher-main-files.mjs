@@ -4,6 +4,7 @@ import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import ts from 'typescript';
 
 const historicalModules = new Set(['auth.js', 'game-bridge-session.js', 'ticket-bridge.js']);
+const removedSkinModules = new Set(['game-skin.js', 'minecraft-skin.js']);
 
 export async function launcherMainFiles(directory) {
   const root = resolve(directory);
@@ -13,6 +14,7 @@ export async function launcherMainFiles(directory) {
     const name = pending.pop();
     if (files.has(name)) continue;
     if (historicalModules.has(name)) throw new Error(`Historical account module is not part of the launcher: ${name}`);
+    if (removedSkinModules.has(name)) throw new Error(`Removed skin module is not part of the launcher: ${name}`);
     const path = join(root, name);
     if (!(await lstat(path)).isFile()) throw new Error(`Expected a regular launcher file: ${name}`);
     const source = await readFile(path, 'utf8');
