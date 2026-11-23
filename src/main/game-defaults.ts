@@ -1,6 +1,6 @@
 import { join } from 'node:path';
 import { gameDataWriter, readGameData } from './game-data.js';
-import { addDefaultServer } from './default-server.js';
+import { addDefaultServer, migrateDefaultServer } from './default-server.js';
 
 const bindings: Record<string, string> = {
   'key_key.sable_player_ragdoll.ragdoll': 'key.keyboard.x',
@@ -42,16 +42,18 @@ export function applyGameDefaults(gamePath: string): void {
   const writer = gameDataWriter(gamePath);
   const keysDone = writer.completed('keys-x-c');
   const serverDone = writer.completed('server-play2go');
+  const serverMigrationDone = writer.completed('server-play2go-c9');
   const options = keysDone ? null : readGameData(join(gamePath, 'options.txt'));
-  const servers = serverDone ? null : readGameData(join(gamePath, 'servers.dat'));
+  const servers = serverMigrationDone ? null : readGameData(join(gamePath, 'servers.dat'));
   const nextOptions = keysDone ? null : defaultKeyBindings(options);
-  const nextServers = serverDone ? null : addDefaultServer(servers);
+  const nextServers = serverMigrationDone ? null : serverDone ? migrateDefaultServer(servers) : addDefaultServer(servers);
   if (nextOptions) {
     writer.replace('options.txt', options, nextOptions);
     writer.complete('keys-x-c');
   }
-  if (nextServers) {
-    writer.replace('servers.dat', servers, nextServers);
-    writer.complete('server-play2go');
+  if (nextServers) writer.replace('servers.dat', servers, nextServers);
+  if (!serverMigrationDone) {
+    if (!serverDone) writer.complete('server-play2go');
+    writer.complete('server-play2go-c9');
   }
 }

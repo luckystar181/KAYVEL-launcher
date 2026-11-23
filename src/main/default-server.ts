@@ -1,6 +1,8 @@
 import { gunzipSync, gzipSync } from 'node:zlib';
 
-export const defaultServerAddress = 'c4.play2go.cloud:20203';
+export const defaultServerAddress = 'c9.play2go.cloud:20018';
+export const previousDefaultServerAddress = 'c4.play2go.cloud:20203';
+const defaultServerName = 'KAYVEL';
 const fail = () => new Error('Не удалось прочитать servers.dat. Список серверов оставлен без изменений.');
 
 type Tag = { type: number; name: string; start: number; payload: number; end: number; children?: Tag[]; listType?: number; count?: number; text?: string };
@@ -60,24 +62,54 @@ const word = (value: string) => {
 const integer = (value: number) => { const bytes = Buffer.alloc(4); bytes.writeInt32BE(value); return bytes; };
 const textTag = (name: string, value: string) => Buffer.concat([Buffer.from([8]), word(name), word(value)]);
 
-export function addDefaultServer(previous: Buffer | null): Buffer {
+function unpack(previous: Buffer | null): { bytes: Buffer; compressed: boolean } {
   const compressed = previous?.[0] === 0x1f && previous?.[1] === 0x8b;
   let bytes: Buffer;
   try { bytes = previous ? compressed ? gunzipSync(previous, { maxOutputLength: 4_194_304 }) : previous : Buffer.from([10, 0, 0, 0]); }
   catch { throw fail(); }
-  const root = parse(bytes);
+  return { bytes, compressed };
+}
+
+function serverList(root: Tag): Tag | undefined {
   const lists = root.children!.filter(tag => tag.name === 'servers');
   if (lists.length > 1) throw fail();
   const list = lists[0];
   if (list && (list.type !== 9 || (list.listType !== 10 && !(list.listType === 0 && list.count === 0)))) throw fail();
-  let found = false;
   for (const server of list?.children ?? []) {
     const ips = server.children!.filter(tag => tag.name === 'ip');
     if (ips.length !== 1 || ips[0].type !== 8) throw fail();
-    if (ips[0].text?.trim().toLowerCase() === defaultServerAddress) found = true;
   }
+  return list;
+}
+
+export function migrateDefaultServer(previous: Buffer | null): Buffer | null {
+  if (!previous) return previous;
+  const { bytes, compressed } = unpack(previous);
+  const root = parse(bytes);
+  const list = serverList(root);
+  const replacements: Array<{ start: number; end: number }> = [];
+  for (const server of list?.children ?? []) {
+    const names = server.children!.filter(tag => tag.name === 'name');
+    const ip = server.children!.find(tag => tag.name === 'ip');
+    if (names.length === 1 && names[0].type === 8 && names[0].text === defaultServerName && ip &&
+        ip.text === previousDefaultServerAddress) replacements.push({ start: ip.start, end: ip.end });
+  }
+  if (replacements.length !== 1) return previous;
+  let next = bytes;
+  for (const replacement of replacements.sort((left, right) => right.start - left.start)) {
+    next = Buffer.concat([next.subarray(0, replacement.start), textTag('ip', defaultServerAddress), next.subarray(replacement.end)]);
+  }
+  parse(next);
+  return compressed ? gzipSync(next) : next;
+}
+
+export function addDefaultServer(previous: Buffer | null): Buffer {
+  const { bytes, compressed } = unpack(previous);
+  const root = parse(bytes);
+  const list = serverList(root);
+  const found = (list?.children ?? []).some(server => server.children!.some(tag => tag.name === 'ip' && tag.type === 8 && tag.text?.trim().toLowerCase() === defaultServerAddress));
   if (found) return previous!;
-  const entry = Buffer.concat([textTag('name', 'KAYVEL'), textTag('ip', defaultServerAddress), Buffer.from([0])]);
+  const entry = Buffer.concat([textTag('name', defaultServerName), textTag('ip', defaultServerAddress), Buffer.from([0])]);
   let next: Buffer;
   if (list) {
     next = Buffer.concat([bytes.subarray(0, list.payload), Buffer.from([10]), integer(list.count! + 1), bytes.subarray(list.payload + 5, list.end), entry, bytes.subarray(list.end)]);

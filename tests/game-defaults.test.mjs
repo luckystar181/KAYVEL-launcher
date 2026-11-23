@@ -5,7 +5,7 @@ import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { gzipSync, gunzipSync } from 'node:zlib';
-import { addDefaultServer, defaultServerAddress } from '../dist/main/default-server.js';
+import { addDefaultServer, defaultServerAddress, migrateDefaultServer, previousDefaultServerAddress } from '../dist/main/default-server.js';
 import { applyGameDefaults, defaultKeyBindings } from '../dist/main/game-defaults.js';
 
 const cat = (...parts) => Buffer.concat(parts.map(part => typeof part === 'number' ? Buffer.from([part]) : part));
@@ -41,15 +41,61 @@ test('existing servers, icons, flags and unrelated NBT tags retain their origina
 });
 
 for (const compressed of [false, true]) {
-  test(`existing address is not duplicated or renamed, compression=${compressed}`, () => {
-    const bytes = root([server('C4.PLAY2GO.CLOUD:20203', 'Моё имя')]);
+  test(`existing current address is not duplicated, compression=${compressed}`, () => {
+    const bytes = root([server(defaultServerAddress, 'Моё имя')]);
     const previous = compressed ? gzipSync(bytes) : bytes;
     assert.deepEqual(addDefaultServer(previous), previous);
+  });
+  test(`legacy address receives the new default on a fresh application, compression=${compressed}`, () => {
+    const bytes = root([server(previousDefaultServerAddress, 'Моё имя')]);
+    const previous = compressed ? gzipSync(bytes) : bytes;
+    const next = addDefaultServer(previous);
+    assert.deepEqual(compressed ? gunzipSync(next) : next, root([server(previousDefaultServerAddress, 'Моё имя'), target]));
   });
   test(`appending preserves format, compression=${compressed}`, () => {
     const previous = root([server()]);
     const next = addDefaultServer(compressed ? gzipSync(previous) : previous);
     assert.deepEqual(compressed ? gunzipSync(next) : next, root([server(), target]));
+  });
+}
+
+test('legacy migration changes only the old automatically-added KAYVEL entry', () => {
+  const previous = root([
+    server(previousDefaultServerAddress, 'KAYVEL'),
+    server(previousDefaultServerAddress, 'Пользовательский сервер'),
+    server('other.example:25565', 'Другой сервер')
+  ]);
+  assert.deepEqual(migrateDefaultServer(previous), root([
+    server(defaultServerAddress, 'KAYVEL'),
+    server(previousDefaultServerAddress, 'Пользовательский сервер'),
+    server('other.example:25565', 'Другой сервер')
+  ]));
+  const compressed = gzipSync(previous);
+  assert.deepEqual(gunzipSync(migrateDefaultServer(compressed)), root([
+    server(defaultServerAddress, 'KAYVEL'),
+    server(previousDefaultServerAddress, 'Пользовательский сервер'),
+    server('other.example:25565', 'Другой сервер')
+  ]));
+});
+
+for (const compressed of [false, true]) {
+  test(`migration preserves edited and ambiguous entries byte-for-byte, compression=${compressed}`, () => {
+    const cases = [
+      root([server(` ${previousDefaultServerAddress}`, 'KAYVEL')]),
+      root([server(`${previousDefaultServerAddress} `, 'KAYVEL')]),
+      root([server(previousDefaultServerAddress.toUpperCase(), 'KAYVEL')]),
+      root([server(previousDefaultServerAddress, 'kayvel')]),
+      root([server(previousDefaultServerAddress, 'KAYVEL ')]),
+      root([server('personal.example:25565', 'KAYVEL')]),
+      root([server(previousDefaultServerAddress, 'KAYVEL'), server(previousDefaultServerAddress, 'KAYVEL')]),
+      root([cat(text('name', 'KAYVEL'), text('name', 'KAYVEL'), text('ip', previousDefaultServerAddress), 0)]),
+      root()
+    ];
+    for (const bytes of cases) {
+      const previous = compressed ? gzipSync(bytes) : bytes;
+      assert.strictEqual(migrateDefaultServer(previous), previous);
+    }
+    assert.equal(migrateDefaultServer(null), null);
   });
 }
 
@@ -109,13 +155,63 @@ test('defaults are applied once, originals backed up and subsequent player choic
   assert.equal(readdirSync(game).some(name => name.endsWith('.tmp')), false);
 }));
 
+test('legacy completion marker migrates only the old KAYVEL server and preserves user servers', () => fixture(({ game, history }) => {
+  const previous = root([
+    server(previousDefaultServerAddress, 'KAYVEL'),
+    server(previousDefaultServerAddress, 'Пользовательский сервер')
+  ]);
+  mkdirSync(history, { recursive: true });
+  const owner = Buffer.from('KAYVEL game defaults v1\n');
+  writeFileSync(join(history, 'owner.txt'), owner);
+  writeFileSync(join(history, 'server-play2go.done'), owner);
+  writeFileSync(join(game, 'servers.dat'), previous);
+  applyGameDefaults(game);
+  assert.deepEqual(readFileSync(join(game, 'servers.dat')), root([
+    server(defaultServerAddress, 'KAYVEL'),
+    server(previousDefaultServerAddress, 'Пользовательский сервер')
+  ]));
+  assert.deepEqual(readFileSync(join(history, `${hash(previous)}.servers.dat.bak`)), previous);
+  assert.ok(readFileSync(join(history, 'server-play2go-c9.done')).equals(owner));
+  const migrated = readFileSync(join(game, 'servers.dat'));
+  applyGameDefaults(game);
+  assert.deepEqual(readFileSync(join(game, 'servers.dat')), migrated);
+}));
+
+
+test('without legacy marker the old KAYVEL entry is preserved and only the new default is appended', () => fixture(({ game }) => {
+  const previous = root([server(previousDefaultServerAddress, 'KAYVEL')]);
+  writeFileSync(join(game, 'servers.dat'), previous);
+  applyGameDefaults(game);
+  assert.deepEqual(readFileSync(join(game, 'servers.dat')), root([server(previousDefaultServerAddress, 'KAYVEL'), target]));
+}));
+
+for (const entries of [
+  [server(previousDefaultServerAddress.toUpperCase(), 'KAYVEL')],
+  [server(previousDefaultServerAddress, 'Мой сервер')],
+  [server(previousDefaultServerAddress, 'KAYVEL'), server(previousDefaultServerAddress, 'KAYVEL')],
+  []
+]) test(`legacy marker never replaces edited, ambiguous or removed servers: ${hash(root(entries))}`, () => fixture(({ game, history }) => {
+  mkdirSync(history, { recursive: true });
+  const owner = Buffer.from('KAYVEL game defaults v1\n');
+  for (const name of ['owner.txt', 'keys-x-c.done', 'server-play2go.done']) writeFileSync(join(history, name), owner);
+  const previous = gzipSync(root(entries));
+  writeFileSync(join(game, 'servers.dat'), previous);
+  applyGameDefaults(game);
+  assert.deepEqual(readFileSync(join(game, 'servers.dat')), previous);
+  assert.deepEqual(readFileSync(join(history, 'server-play2go.done')), owner);
+  assert.deepEqual(readFileSync(join(history, 'server-play2go-c9.done')), owner);
+  assert.equal(readdirSync(history).some(name => name.endsWith('.bak')), false);
+  applyGameDefaults(game);
+  assert.deepEqual(readFileSync(join(game, 'servers.dat')), previous);
+}));
+
 test('fresh defaults and repeat application do not create duplicate servers or backups', () => fixture(({ game, history }) => {
   applyGameDefaults(game);
   const first = readFileSync(join(game, 'servers.dat'));
   applyGameDefaults(game);
   assert.deepEqual(first, root([target]));
   assert.deepEqual(readFileSync(join(game, 'servers.dat')), first);
-  assert.deepEqual(readdirSync(history).sort(), ['keys-x-c.done', 'owner.txt', 'server-play2go.done']);
+  assert.deepEqual(readdirSync(history).sort(), ['keys-x-c.done', 'owner.txt', 'server-play2go-c9.done', 'server-play2go.done']);
 }));
 
 test('invalid server list aborts before changing options or producing completion markers', () => fixture(({ game, history }) => {
@@ -127,7 +223,7 @@ test('invalid server list aborts before changing options or producing completion
   assert.deepEqual(readdirSync(history), ['owner.txt']);
 }));
 
-for (const name of ['options.txt', 'servers.dat', '.kayvel/game-defaults-v1/owner.txt', '.kayvel/game-defaults-v1/keys-x-c.done', '.kayvel/game-defaults-v1/server-play2go.done']) {
+for (const name of ['options.txt', 'servers.dat', '.kayvel/game-defaults-v1/owner.txt', '.kayvel/game-defaults-v1/keys-x-c.done', '.kayvel/game-defaults-v1/server-play2go.done', '.kayvel/game-defaults-v1/server-play2go-c9.done']) {
   test(`hardlinked data is rejected: ${name}`, () => fixture(({ dir, game, history }) => {
     if (name.includes('game-defaults')) {
       applyGameDefaults(game);

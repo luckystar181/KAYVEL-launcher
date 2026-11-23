@@ -5,13 +5,11 @@ import { prepareFileDirectory, readZipFiles, writeNewFile } from './install-file
 import { downloadNewFile, fileDigest } from './official-download.js';
 import { checkDownloadCancelled } from './download-session.js';
 import { stageProgress, type ReportProgress } from './preparation-progress.js';
-import { ReleaseHttpError } from './release-download.js';
 
 export const FFMPEG_ARCHIVE = {
-  url: 'https://www.gyan.dev/ffmpeg/builds/packages/ffmpeg-9.0.2-essentials_build.zip',
+  url: 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip',
   size: 114768076, hash: '60f467265b1e312373dbcd92200c2618a74850f98d3d078e94296bb3fa2047ba', algorithm: 'sha256' as const
 };
-export const FFMPEG_MIRROR_URL = 'https://github.com/GyanD/codexffmpeg/releases/download/9.0.2/ffmpeg-9.0.2-essentials_build.zip';
 export const FFMPEG_FILES = [
   { name: 'ffmpeg.exe', entry: 'bin/ffmpeg.exe', size: 105423872, hash: '3256173f3f8bffd7df12227c68adf68025edb1832273a9530688a7bb1ed8edec' },
   { name: 'ffprobe.exe', entry: 'bin/ffprobe.exe', size: 105221120, hash: 'f0d36ecbbdd3bcfac3efa078c96c7271c2e68b3810595552ac3b7f17e9a65c52' },
@@ -22,7 +20,7 @@ const folder = 'vista_ffmpeg_bin';
 const archiveRoot = 'ffmpeg-9.0.2-essentials_build/';
 
 export function ffmpegDownloadUrl(value: string): string {
-  if (value === FFMPEG_ARCHIVE.url || value === FFMPEG_MIRROR_URL) return value;
+  if (value === FFMPEG_ARCHIVE.url) return value;
   const url = new URL(value);
   if (url.protocol !== 'https:' || url.hostname !== 'release-assets.githubusercontent.com' ||
       url.username || url.password || url.port || url.hash ||
@@ -30,11 +28,6 @@ export function ffmpegDownloadUrl(value: string): string {
     throw new Error('Недоверенный адрес FFmpeg.');
   }
   return url.href;
-}
-
-function sourceUnavailable(error: unknown): boolean {
-  return error instanceof ReleaseHttpError && (error.status >= 500 && error.status <= 599 || [408, 429].includes(error.status)) ||
-    error instanceof Error && error.name === 'DownloadTransportError';
 }
 
 async function directory(path: string): Promise<void> {
@@ -65,7 +58,7 @@ export async function prepareFFmpeg(root: string, report: ReportProgress = () =>
   if (present) { await verifyFFmpeg(root); return; }
   await prepareFileDirectory(root, '.kayvel/ffmpeg-attempts/placeholder');
   const attempt = await mkdtemp(join(root, '.kayvel', 'ffmpeg-attempts', '9.0.2-'));
-  let archive = join(attempt, 'ffmpeg.zip');
+  const archive = join(attempt, 'ffmpeg.zip');
   stageProgress(report, 'verify', 'Подготовка FFmpeg и FFprobe для Vista');
   const progress = (received: number, total: number) => {
     report({ stage: 'modpack', file: 'FFmpeg 9.0.2 (Vista)', received, total, completedFiles: 0, totalFiles: 1 });
@@ -74,15 +67,7 @@ export async function prepareFFmpeg(root: string, report: ReportProgress = () =>
     await download({ ...FFMPEG_ARCHIVE, path: archive }, progress, ffmpegDownloadUrl);
   } catch (error) {
     checkDownloadCancelled();
-    if (!sourceUnavailable(error)) throw error;
-    archive = join(attempt, 'ffmpeg-github.zip');
-    stageProgress(report, 'verify', 'Основной сервер FFmpeg недоступен; резервная загрузка автора с GitHub');
-    try {
-      await download({ ...FFMPEG_ARCHIVE, url: FFMPEG_MIRROR_URL, path: archive }, progress, ffmpegDownloadUrl);
-    } catch (fallbackError) {
-      checkDownloadCancelled();
-      throw new AggregateError([error, fallbackError], 'Не удалось загрузить FFmpeg с основного и резервного серверов.', { cause: fallbackError });
-    }
+    throw error;
   }
   checkDownloadCancelled();
   const selected = new Set(FFMPEG_FILES.map(file => archiveRoot + file.entry));

@@ -113,7 +113,7 @@ test('one-time key and server defaults preserve preparation verification and pla
   } finally { await release(); }
   assert.ok((await text(root, 'options.txt')).includes('key_key.sable_player_ragdoll.ragdoll:key.keyboard.x\r\n'));
   assert.ok((await text(root, 'options.txt')).includes('key_key.freecam.toggle:key.keyboard.c\r\n'));
-  assert.ok((await text(root, 'servers.dat')).includes('c4.play2go.cloud:20203'));
+  assert.ok((await text(root, 'servers.dat')).includes('c9.play2go.cloud:20018'));
   const defaults = new Map(await Promise.all((await readdir(join(root, '.kayvel/game-defaults-v1')))
     .map(async name => [name, await readFile(join(root, '.kayvel/game-defaults-v1', name))])));
   assert.ok([...defaults.values()].some(bytes => bytes.equals(originalOptions)));
